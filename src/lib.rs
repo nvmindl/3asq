@@ -153,9 +153,11 @@ impl Source for ThreeAsq {
 		if needs_chapters {
 			let mut chapters: Vec<Chapter> = Vec::new();
 
-			if let Some(chapter_items) =
-				html.select(".listing-chapters_wrap .wp-manga-chapter")
-			{
+			// Chapters are loaded via AJAX on Madara theme
+			let chapters_url = format!("{}/manga/{}/ajax/chapters/", BASE_URL, manga.key);
+			let ch_html = Request::post(&chapters_url)?.html()?;
+
+			if let Some(chapter_items) = ch_html.select(".wp-manga-chapter") {
 				for ch in chapter_items {
 					let link = ch.select_first("a");
 					let ch_title = link.as_ref().and_then(|e| e.text()).unwrap_or_default();

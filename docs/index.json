@@ -4,9 +4,9 @@
     {
       "id": "ar.3asq",
       "name": "3asq",
-      "version": 1,
-      "iconURL": "icons/ar.3asq-v1.png",
-      "downloadURL": "sources/ar.3asq-v1.aix",
+      "version": 2,
+      "iconURL": "icons/ar.3asq-v2.png",
+      "downloadURL": "sources/ar.3asq-v2.aix",
       "languages": [
         "ar"
       ],
