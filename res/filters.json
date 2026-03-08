@@ -11,7 +11,7 @@
 			"Trending",
 			"Most Views"
 		],
-		"default": 0
+		"default": {"index": 0, "ascending": false}
 	},
 	{
 		"type": "multi-select",
