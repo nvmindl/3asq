@@ -1,0 +1,20 @@
+{
+	"info": {
+		"id": "ar.3asq",
+		"name": "3asq",
+		"version": 1,
+		"url": "https://3asq.org",
+		"contentRating": 1,
+		"languages": ["ar"]
+	},
+	"listings": [
+		{
+			"id": "latest",
+			"name": "Latest"
+		},
+		{
+			"id": "popular",
+			"name": "Popular"
+		}
+	]
+}
