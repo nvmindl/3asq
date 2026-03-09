@@ -1,345 +1,291 @@
 #![no_std]
 use aidoku::{
-	alloc::{String, Vec},
-	imports::net::Request,
+	error::Result,
 	prelude::*,
-	Chapter, DeepLinkHandler, DeepLinkResult, FilterValue, Listing, ListingProvider,
-	Manga, MangaPageResult, MangaStatus, Page, PageContent, Result, Source,
+	std::{
+		html::Node,
+		net::{HttpMethod, Request},
+		String, Vec,
+	},
+	Chapter, DeepLink, Filter, FilterType, Listing, Manga, MangaPageResult,
+	MangaStatus, MangaViewer, Page,
 };
+
+extern crate alloc;
 
 const BASE_URL: &str = "https://3asq.org";
 
-struct ThreeAsq;
-
-impl Source for ThreeAsq {
-	fn new() -> Self {
-		Self
+fn get_image_url(obj: Node) -> String {
+	let mut img = obj.attr("data-src").read();
+	if img.is_empty() {
+		img = obj.attr("data-lazy-src").read();
 	}
-
-	fn get_search_manga_list(
-		&self,
-		query: Option<String>,
-		page: i32,
-		_filters: Vec<FilterValue>,
-	) -> Result<MangaPageResult> {
-		if let Some(query) = query {
-			let url = format!(
-				"{}/page/{}/?s={}&post_type=wp-manga",
-				BASE_URL, page, query
-			);
-			let html = Request::get(&url)?.html()?;
-			let mut entries: Vec<Manga> = Vec::new();
-
-			if let Some(items) = html.select(".c-tabs-item .row.c-tabs-item__content") {
-				for item in items {
-					let title_el = item.select_first(".post-title a");
-					let title = title_el.as_ref().and_then(|e| e.text()).unwrap_or_default();
-					let href = title_el
-						.as_ref()
-						.and_then(|e| e.attr("href"))
-						.unwrap_or_default();
-					let key = extract_manga_key(&href);
-					let cover = item
-						.select_first(".tab-thumb img")
-						.and_then(|e| e.attr("src"));
-
-					if !key.is_empty() {
-						entries.push(Manga {
-							key,
-							title,
-							cover,
-							..Default::default()
-						});
-					}
-				}
-			}
-
-			let has_next = html.select_first(".wp-pagenavi .nextpostslink").is_some()
-				|| html.select_first(".nav-previous a").is_some();
-
-			Ok(MangaPageResult {
-				entries,
-				has_next_page: has_next,
-			})
-		} else {
-			self.get_manga_list_page(page, "latest")
-		}
+	if img.is_empty() {
+		img = obj.attr("src").read();
 	}
-
-	fn get_manga_update(
-		&self,
-		mut manga: Manga,
-		needs_details: bool,
-		needs_chapters: bool,
-	) -> Result<Manga> {
-		let url = format!("{}/manga/{}/", BASE_URL, manga.key);
-		let html = Request::get(&url)?.html()?;
-
-		if needs_details {
-			manga.url = Some(url);
-
-			// Title
-			if let Some(title) = html.select_first(".post-title h1").and_then(|e| e.text()) {
-				manga.title = title.trim().into();
-			}
-
-			// Cover
-			manga.cover = html
-				.select_first(".summary_image img")
-				.and_then(|e| e.attr("src"));
-
-			// Parse metadata from content items
-			if let Some(content_items) = html.select(".post-content_item") {
-				for item in content_items {
-					let heading = item
-						.select_first(".summary-heading h5")
-						.and_then(|e| e.text())
-						.unwrap_or_default();
-					let heading = heading.trim();
-
-					if heading.contains("الكاتب") {
-						manga.authors = Some(
-							item.select(".summary-content a")
-								.into_iter()
-								.flatten()
-								.filter_map(|a| a.text())
-								.collect(),
-						);
-					} else if heading.contains("الرسام") {
-						manga.artists = Some(
-							item.select(".summary-content a")
-								.into_iter()
-								.flatten()
-								.filter_map(|a| a.text())
-								.collect(),
-						);
-					} else if heading.contains("التصنيفات") {
-						manga.tags = Some(
-							item.select(".summary-content a")
-								.into_iter()
-								.flatten()
-								.filter_map(|a| a.text())
-								.collect(),
-						);
-					} else if heading.contains("الحالة") {
-						let status_text = item
-							.select_first(".summary-content")
-							.and_then(|e| e.text())
-							.unwrap_or_default();
-						let status_text = status_text.trim();
-						manga.status = if status_text.contains("مستمرة") {
-							MangaStatus::Ongoing
-						} else if status_text.contains("مكتملة") {
-							MangaStatus::Completed
-						} else if status_text.contains("متوقفة") {
-							MangaStatus::Hiatus
-						} else if status_text.contains("ملغاة") {
-							MangaStatus::Cancelled
-						} else {
-							MangaStatus::Unknown
-						};
-					}
-				}
-			}
-
-			// Description
-			manga.description = html
-				.select_first(".description-summary .summary__content")
-				.or_else(|| html.select_first(".summary__content"))
-				.and_then(|e| e.text())
-				.map(|t| t.trim().into());
-		}
-
-		if needs_chapters {
-			let mut chapters: Vec<Chapter> = Vec::new();
-
-			// Chapters are loaded via AJAX on Madara theme
-			let chapters_url = format!("{}/manga/{}/ajax/chapters/", BASE_URL, manga.key);
-			let ch_html = Request::post(&chapters_url)?.html()?;
-
-			if let Some(chapter_items) = ch_html.select(".wp-manga-chapter") {
-				for ch in chapter_items {
-					let link = ch.select_first("a");
-					let ch_title = link.as_ref().and_then(|e| e.text()).unwrap_or_default();
-					let ch_href = link
-						.as_ref()
-						.and_then(|e| e.attr("href"))
-						.unwrap_or_default();
-					let ch_key = extract_chapter_key(&ch_href, &manga.key);
-
-					let chapter_number = parse_chapter_number(&ch_title, &ch_key);
-
-					chapters.push(Chapter {
-						key: ch_key,
-						title: Some(ch_title.trim().into()),
-						chapter_number: Some(chapter_number),
-						..Default::default()
-					});
-				}
-			}
-
-			manga.chapters = Some(chapters);
-		}
-
-		Ok(manga)
+	if img.is_empty() {
+		img = obj.attr("srcset").read();
 	}
-
-	fn get_page_list(&self, manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-		let url = format!("{}/manga/{}/{}/", BASE_URL, manga.key, chapter.key);
-		let html = Request::get(&url)?.html()?;
-		let mut pages: Vec<Page> = Vec::new();
-
-		if let Some(containers) = html.select(".reading-content .page-break") {
-			for container in containers {
-				let src: Option<String> = container
-					.select_first("img")
-					.and_then(|img| {
-						img.attr("src").or_else(|| img.attr("data-src"))
-					})
-					.map(|s| {
-						let trimmed: &str = s.trim();
-						String::from(trimmed)
-					});
-				if let Some(src) = src {
-					pages.push(Page {
-						content: PageContent::url(&src),
-						..Default::default()
-					});
-				}
-			}
-		}
-
-		Ok(pages)
-	}
+	String::from(img.trim())
 }
 
-impl ListingProvider for ThreeAsq {
-	fn get_manga_list(&self, listing: Listing, page: i32) -> Result<MangaPageResult> {
-		let order = match listing.id.as_str() {
-			"latest" => "latest",
-			"popular" => "views",
-			_ => "latest",
-		};
-		self.get_manga_list_page(page, order)
-	}
-}
-
-impl DeepLinkHandler for ThreeAsq {
-	fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
-		let path = url
-			.strip_prefix("https://3asq.org")
-			.or_else(|| url.strip_prefix("http://3asq.org"))
-			.unwrap_or(&url);
-
-		let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
-
-		if parts.len() >= 2 && parts[0] == "manga" {
-			let manga_key = String::from(parts[1]);
-			if parts.len() >= 3 && !parts[2].is_empty() {
-				return Ok(Some(DeepLinkResult::Chapter {
-					manga_key,
-					key: String::from(parts[2]),
-				}));
-			}
-			return Ok(Some(DeepLinkResult::Manga { key: manga_key }));
-		}
-
-		Ok(None)
-	}
-}
-
-impl ThreeAsq {
-	fn get_manga_list_page(&self, page: i32, order: &str) -> Result<MangaPageResult> {
-		let url = format!(
-			"{}/manga/page/{}/?m_orderby={}",
-			BASE_URL, page, order
-		);
-		let html = Request::get(&url)?.html()?;
-		let mut entries: Vec<Manga> = Vec::new();
-
-		if let Some(items) = html.select(".page-item-detail") {
-			for item in items {
-				let link = item.select_first(".post-title a");
-				let title = link.as_ref().and_then(|e| e.text()).unwrap_or_default();
-				let href = link
-					.as_ref()
-					.and_then(|e| e.attr("href"))
-					.unwrap_or_default();
-				let key = extract_manga_key(&href);
-				let cover = item
-					.select_first(".item-thumb img")
-					.and_then(|e| e.attr("src"));
-
-				if !key.is_empty() {
-					entries.push(Manga {
-						key,
-						title: title.trim().into(),
-						cover,
-						..Default::default()
-					});
-				}
-			}
-		}
-
-		let has_next = html
-			.select_first(".wp-pagenavi .nextpostslink")
-			.is_some()
-			|| html.select_first("a.nextpostslink").is_some()
-			|| html.select_first(".nav-previous a").is_some();
-
-		Ok(MangaPageResult {
-			entries,
-			has_next_page: has_next,
-		})
-	}
-}
-
-fn extract_manga_key(url: &str) -> String {
+fn extract_id_from_url(url: &str) -> String {
 	let stripped = url
-		.strip_prefix("https://3asq.org/manga/")
-		.or_else(|| url.strip_prefix("http://3asq.org/manga/"))
-		.unwrap_or(url);
-	let key = stripped.trim_matches('/');
-	key.split('/').next().unwrap_or(key).into()
+		.replace(BASE_URL, "")
+		.replace("/manga/", "")
+		.replace('/', "");
+	stripped
 }
 
-fn extract_chapter_key(url: &str, manga_key: &str) -> String {
-	let prefix = format!("{}/manga/{}/", BASE_URL, manga_key);
-	let stripped = url.strip_prefix(prefix.as_str()).unwrap_or(url);
-	stripped.trim_matches('/').into()
-}
+fn get_listing_page(order: &str, page: i32) -> Result<MangaPageResult> {
+	let url = alloc::format!(
+		"{}/page/{}?s&post_type=wp-manga&m_orderby={}",
+		BASE_URL, page, order
+	);
 
-fn parse_chapter_number(title: &str, key: &str) -> f32 {
-	let key_num = key.replace('-', ".");
-	if let Some(num) = try_parse_float(&key_num) {
-		return num;
-	}
-	let title = title.trim();
-	let num_str: String = title
-		.chars()
-		.take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
-		.collect();
-	let num_str = num_str.replace('-', ".");
-	try_parse_float(&num_str).unwrap_or(0.0)
-}
+	let html = Request::get(&url)
+		.header("Cookie", "wpmanga-adault=1")
+		.html()?;
+	let mut manga: Vec<Manga> = Vec::new();
+	let mut has_more = false;
 
-fn try_parse_float(s: &str) -> Option<f32> {
-	if s.is_empty() {
-		return None;
-	}
-	let parts: Vec<&str> = s.splitn(2, '.').collect();
-	let integer: f32 = parts[0].parse::<i64>().ok()? as f32;
-	if parts.len() == 2 {
-		let frac_str = parts[1];
-		let frac: f32 = frac_str.parse::<i64>().ok()? as f32;
-		let mut divisor: f32 = 1.0;
-		for _ in 0..frac_str.len() {
-			divisor *= 10.0;
+	for item in html.select("div.c-tabs-item__content").array() {
+		let obj = item.as_node().expect("node array");
+
+		let id = extract_id_from_url(&obj.select("a").attr("href").read());
+		let title = obj.select("a").attr("title").read();
+		let cover = get_image_url(obj.select("img"));
+
+		if !id.is_empty() {
+			manga.push(Manga {
+				id,
+				cover,
+				title,
+				..Default::default()
+			});
+			has_more = true;
 		}
-		Some(integer + frac / divisor)
+	}
+
+	Ok(MangaPageResult { manga, has_more })
+}
+
+#[get_manga_list]
+fn get_manga_list(filters: Vec<Filter>, page: i32) -> Result<MangaPageResult> {
+	let mut search_string = String::new();
+	let mut is_searching = false;
+
+	for filter in filters {
+		match filter.kind {
+			FilterType::Title => {
+				if let Ok(filter_value) = filter.value.as_string() {
+					search_string.push_str(&filter_value.read().to_lowercase());
+					is_searching = true;
+				}
+			}
+			_ => continue,
+		}
+	}
+
+	if is_searching {
+		let url = alloc::format!(
+			"{}/page/{}/?s={}&post_type=wp-manga",
+			BASE_URL, page, search_string
+		);
+
+		let html = Request::get(&url)
+			.header("Cookie", "wpmanga-adault=1")
+			.html()?;
+		let mut manga: Vec<Manga> = Vec::new();
+		let mut has_more = false;
+
+		for item in html.select("div.c-tabs-item__content").array() {
+			let obj = item.as_node().expect("node array");
+
+			let id = extract_id_from_url(&obj.select("a").attr("href").read());
+			let title = obj.select("a").attr("title").read();
+			let cover = get_image_url(obj.select("img"));
+
+			if !id.is_empty() {
+				manga.push(Manga {
+					id,
+					cover,
+					title,
+					..Default::default()
+				});
+				has_more = true;
+			}
+		}
+
+		Ok(MangaPageResult { manga, has_more })
 	} else {
-		Some(integer)
+		get_listing_page("latest", page)
 	}
 }
 
-register_source!(ThreeAsq, ListingProvider, DeepLinkHandler);
+#[get_manga_listing]
+fn get_manga_listing(listing: Listing, page: i32) -> Result<MangaPageResult> {
+	let order = match listing.name.as_str() {
+		"Popular" => "views",
+		"Trending" => "trending",
+		_ => "latest",
+	};
+	get_listing_page(order, page)
+}
+
+#[get_manga_details]
+fn get_manga_details(id: String) -> Result<Manga> {
+	let url = alloc::format!("{}/manga/{}", BASE_URL, id);
+	let html = Request::get(&url).html()?;
+
+	// Title — strip badge text like "HOT", "3asq", etc.
+	let title_badges = html.select("span.manga-title-badges").text().read();
+	let mut title = html.select("div.post-title h1").text().read();
+	if title.contains(&title_badges) && !title_badges.is_empty() {
+		title = title.replace(&title_badges, "");
+		title = String::from(title.trim());
+	}
+
+	let cover = get_image_url(html.select("div.summary_image img"));
+	let author = html.select("div.author-content a").text().read();
+	let artist = html.select("div.artist-content a").text().read();
+	let description = html.select("div.manga-excerpt p").text().read();
+
+	let mut categories: Vec<String> = Vec::new();
+	for item in html.select("div.genres-content > a").array() {
+		categories.push(item.as_node().expect("node array").text().read());
+	}
+
+	let status_str = html
+		.select("div.post-content_item:contains(الحالة) div.summary-content")
+		.text()
+		.read()
+		.to_lowercase();
+	let status = if status_str.contains("مستمرة") || status_str.contains("ongoing") {
+		MangaStatus::Ongoing
+	} else if status_str.contains("مكتملة") || status_str.contains("completed") {
+		MangaStatus::Completed
+	} else if status_str.contains("متوقفة") || status_str.contains("hiatus") || status_str.contains("on hold") {
+		MangaStatus::Hiatus
+	} else if status_str.contains("ملغاة") || status_str.contains("canceled") {
+		MangaStatus::Cancelled
+	} else {
+		MangaStatus::Unknown
+	};
+
+	Ok(Manga {
+		id,
+		cover,
+		title,
+		author,
+		artist,
+		description,
+		url,
+		categories,
+		status,
+		viewer: MangaViewer::Rtl,
+		..Default::default()
+	})
+}
+
+#[get_chapter_list]
+fn get_chapter_list(id: String) -> Result<Vec<Chapter>> {
+	let url = alloc::format!("{}/manga/{}/ajax/chapters", BASE_URL, id);
+
+	let html = Request::new(&url, HttpMethod::Post)
+		.header("Referer", BASE_URL)
+		.header("Content-Type", "application/x-www-form-urlencoded")
+		.html()?;
+
+	let mut chapters: Vec<Chapter> = Vec::new();
+	for item in html.select("li.wp-manga-chapter").array() {
+		let obj = item.as_node().expect("node array");
+
+		let ch_url = obj.select("a").attr("href").read();
+		let ch_id = ch_url
+			.replace(BASE_URL, "")
+			.replacen("/manga/", "", 1);
+
+		let ch_text = obj.select("a").text().read();
+		let mut ch_title = String::new();
+		if ch_text.contains('-') {
+			if let Some(pos) = ch_text.find('-') {
+				ch_title.push_str(ch_text[pos + 1..].trim());
+			}
+		}
+
+		// Parse chapter number from URL slug
+		let slash_vec = ch_id.split('/').collect::<Vec<&str>>();
+		let chapter_slug = if slash_vec.len() >= 2 {
+			slash_vec[slash_vec.len() - 2]
+		} else {
+			&ch_id
+		};
+
+		let dash_vec: Vec<&str> = chapter_slug.split('-').collect();
+		let mut chapter = 0.0_f32;
+		let mut found_num = false;
+		for part in &dash_vec {
+			let val = part.parse::<f32>().unwrap_or(-1.0);
+			if val != -1.0 {
+				if found_num {
+					chapter += val / 10.0;
+					break;
+				} else {
+					chapter = val;
+					found_num = true;
+				}
+			}
+		}
+
+		chapters.push(Chapter {
+			id: ch_id,
+			title: ch_title,
+			volume: -1.0,
+			chapter,
+			date_updated: -1.0,
+			scanlator: String::new(),
+			url: ch_url,
+			lang: String::from("ar"),
+		});
+	}
+
+	Ok(chapters)
+}
+
+#[get_page_list]
+fn get_page_list(_manga_id: String, chapter_id: String) -> Result<Vec<Page>> {
+	let url = alloc::format!("{}/{}", BASE_URL, chapter_id);
+	let html = Request::get(&url).html()?;
+
+	let mut pages: Vec<Page> = Vec::new();
+	for (index, item) in html.select("div.page-break img").array().enumerate() {
+		let obj = item.as_node().expect("node array");
+		let img_url = get_image_url(obj);
+		if !img_url.is_empty() {
+			pages.push(Page {
+				index: index as i32,
+				url: img_url,
+				..Default::default()
+			});
+		}
+	}
+
+	Ok(pages)
+}
+
+#[handle_url]
+fn handle_url(url: String) -> Result<DeepLink> {
+	let path = url.replace(BASE_URL, "");
+	let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+
+	let mut manga_id = String::new();
+	if parts.len() >= 2 && parts[0] == "manga" {
+		manga_id = String::from(parts[1]);
+	}
+
+	Ok(DeepLink {
+		manga: Some(get_manga_details(manga_id)?),
+		chapter: None,
+	})
+}

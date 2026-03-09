@@ -2,19 +2,19 @@
 	"info": {
 		"id": "ar.3asq",
 		"name": "3asq",
-		"version": 2,
+		"version": 3,
 		"url": "https://3asq.org",
-		"contentRating": 1,
-		"languages": ["ar"]
+		"languages": ["ar"],
+		"contentRating": 1
 	},
 	"listings": [
 		{
-			"id": "latest",
-			"name": "Latest"
+			"id": "Popular",
+			"name": "Popular"
 		},
 		{
-			"id": "popular",
-			"name": "Popular"
+			"id": "Trending",
+			"name": "Trending"
 		}
 	]
 }
