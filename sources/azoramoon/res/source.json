@@ -1,0 +1,24 @@
+{
+	"info": {
+		"id": "ar.azoramoon",
+		"name": "Azora Manga",
+		"version": 1,
+		"url": "https://azoramoon.com",
+		"languages": ["ar"],
+		"contentRating": 1
+	},
+	"listings": [
+		{
+			"id": "Latest",
+			"name": "Latest"
+		},
+		{
+			"id": "Hot",
+			"name": "Hot"
+		},
+		{
+			"id": "New",
+			"name": "New"
+		}
+	]
+}

@@ -1,13 +1,9 @@
-[package]
-name = "aidoku-source-3asq"
-version = "0.1.0"
-edition = "2024"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-aidoku = { git = "https://github.com/Aidoku/aidoku-rs", branch = "main" }
+[workspace]
+members = [
+	"sources/3asq",
+	"sources/azoramoon",
+]
+resolver = "3"
 
 [profile.dev]
 panic = "abort"

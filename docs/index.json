@@ -12,6 +12,18 @@
       ],
       "contentRating": 1,
       "baseURL": "https://3asq.org"
+    },
+    {
+      "id": "ar.azoramoon",
+      "name": "Azora Manga",
+      "version": 1,
+      "iconURL": "icons/ar.azoramoon-v1.png",
+      "downloadURL": "sources/ar.azoramoon-v1.aix",
+      "languages": [
+        "ar"
+      ],
+      "contentRating": 1,
+      "baseURL": "https://azoramoon.com"
     }
   ]
 }
