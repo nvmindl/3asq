@@ -73,9 +73,25 @@ struct ApiChapter {
 }
 
 #[derive(Deserialize)]
-struct RscImage {
+struct ChapterImage {
 	url: String,
 	order: i64,
+}
+
+#[derive(Deserialize)]
+struct ChapterContentResponse {
+	chapter: ChapterContent,
+}
+
+#[derive(Deserialize)]
+struct ChapterContent {
+	#[serde(default)]
+	images: Vec<ChapterImage>,
+}
+
+#[derive(Deserialize)]
+struct PostDetailResponse {
+	post: ApiPost,
 }
 
 // --- Helpers ---
@@ -153,43 +169,6 @@ fn parse_key(key: &str) -> (i64, &str) {
 	}
 }
 
-/// Extract a string value for a given key from RSC-escaped text.
-fn extract_rsc_string_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-	let pattern = format!("\\\"{}\\\":\\\"", key);
-	if let Some(start) = text.find(&pattern) {
-		let value_start = start + pattern.len();
-		let remaining = &text[value_start..];
-		if let Some(end) = remaining.find("\\\"") {
-			return Some(&remaining[..end]);
-		}
-	}
-	None
-}
-
-/// Extract a JSON array for a given key from RSC-escaped text, unescaping it.
-fn extract_rsc_array(text: &str, key: &str) -> Option<String> {
-	let pattern = format!("\\\"{}\\\":[", key);
-	if let Some(start) = text.find(&pattern) {
-		let arr_start = start + pattern.len() - 1;
-		let remaining = &text[arr_start..];
-		let mut depth = 0;
-		for (i, c) in remaining.char_indices() {
-			match c {
-				'[' => depth += 1,
-				']' => {
-					depth -= 1;
-					if depth == 0 {
-						let raw = &remaining[..i + 1];
-						return Some(raw.replace("\\\"", "\"").replace("\\\\", "\\"));
-					}
-				}
-				_ => {}
-			}
-		}
-	}
-	None
-}
-
 // --- Source implementation ---
 
 impl Source for AzoraMoon {
@@ -224,45 +203,33 @@ impl Source for AzoraMoon {
 		let (post_id, slug) = parse_key(&manga.key);
 
 		if needs_details {
-			let page_url = format!("{}/series/{}", BASE_URL, slug);
-			let html = Request::get(&page_url)?.string()?;
+			let detail_url = format!("{}/post?postId={}", API_URL, post_id);
+			let resp: PostDetailResponse = Request::get(&detail_url)?.json_owned()?;
+			let post = resp.post;
 
-			if let Some(title) = extract_rsc_string_value(&html, "postTitle") {
-				manga.title = String::from(title);
-			}
-			if let Some(content) = extract_rsc_string_value(&html, "postContent") {
-				manga.description = Some(strip_html_tags(content));
-			}
-			if let Some(img) = extract_rsc_string_value(&html, "featuredImage") {
-				manga.cover = Some(String::from(img));
-			}
-			if let Some(status_str) = extract_rsc_string_value(&html, "seriesStatus") {
-				manga.status = match status_str {
-					"ONGOING" => MangaStatus::Ongoing,
-					"COMPLETED" => MangaStatus::Completed,
-					"HIATUS" => MangaStatus::Hiatus,
-					"CANCELLED" | "DROPPED" => MangaStatus::Cancelled,
-					_ => MangaStatus::Unknown,
-				};
-			}
-			if let Some(series_type) = extract_rsc_string_value(&html, "seriesType") {
-				manga.viewer = match series_type {
-					"MANHWA" | "MANHUA" => Viewer::Webtoon,
-					_ => Viewer::RightToLeft,
-				};
-			}
+			manga.title = post.post_title;
+			manga.description = post.post_content.as_deref().map(strip_html_tags);
+			manga.cover = post.featured_image;
+			manga.status = match post.series_status.as_deref() {
+				Some("ONGOING") => MangaStatus::Ongoing,
+				Some("COMPLETED") => MangaStatus::Completed,
+				Some("HIATUS") => MangaStatus::Hiatus,
+				Some("CANCELLED" | "DROPPED") => MangaStatus::Cancelled,
+				_ => MangaStatus::Unknown,
+			};
+			manga.viewer = match post.series_type.as_deref() {
+				Some("MANHWA" | "MANHUA") => Viewer::Webtoon,
+				_ => Viewer::RightToLeft,
+			};
 
-			if let Some(genres_json) = extract_rsc_array(&html, "genres") {
-				if let Ok(genres) = serde_json::from_str::<Vec<ApiGenre>>(&genres_json) {
-					let tags: Vec<String> = genres
-						.into_iter()
-						.map(|g| g.name)
-						.filter(|n| !n.is_empty())
-						.collect();
-					if !tags.is_empty() {
-						manga.tags = Some(tags);
-					}
-				}
+			let tags: Vec<String> = post
+				.genres
+				.into_iter()
+				.map(|g| g.name)
+				.filter(|n| !n.is_empty())
+				.collect();
+			if !tags.is_empty() {
+				manga.tags = Some(tags);
 			}
 
 			manga.url = Some(format!("{}/series/{}", BASE_URL, slug));
@@ -317,49 +284,23 @@ impl Source for AzoraMoon {
 		Ok(manga)
 	}
 
-	fn get_page_list(&self, manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-		let (_post_id, manga_slug) = parse_key(&manga.key);
-		let (_ch_id, ch_slug) = parse_key(&chapter.key);
+	fn get_page_list(&self, _manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
+		let (ch_id, _ch_slug) = parse_key(&chapter.key);
 
-		let url = format!("{}/series/{}/{}", BASE_URL, manga_slug, ch_slug);
-		let html = Request::get(&url)?.string()?;
+		let url = format!("{}/chapter?chapterId={}", API_URL, ch_id);
+		let resp: ChapterContentResponse = Request::get(&url)?.json_owned()?;
 
-		let mut pages: Vec<Page> = Vec::new();
+		let mut images = resp.chapter.images;
+		images.sort_by_key(|img| img.order);
 
-		if let Some(images_json) = extract_rsc_array(&html, "images") {
-			if let Ok(mut images) = serde_json::from_str::<Vec<RscImage>>(&images_json) {
-				images.sort_by_key(|img| img.order);
-				for img in images {
-					if !img.url.is_empty() {
-						pages.push(Page {
-							content: PageContent::url(img.url),
-							..Default::default()
-						});
-					}
-				}
-			}
-		}
-
-		// Fallback: extract from <img data-image-index="N" src="..."> tags
-		if pages.is_empty() {
-			let mut search_pos = 0;
-			while let Some(img_idx) = html[search_pos..].find("data-image-index=") {
-				let abs_idx = search_pos + img_idx;
-				if let Some(src_start) = html[abs_idx..].find("src=\"") {
-					let url_start = abs_idx + src_start + 5;
-					if let Some(url_end) = html[url_start..].find('"') {
-						let img_url = &html[url_start..url_start + url_end];
-						if !img_url.is_empty() {
-							pages.push(Page {
-								content: PageContent::url(String::from(img_url)),
-								..Default::default()
-							});
-						}
-					}
-				}
-				search_pos = abs_idx + 1;
-			}
-		}
+		let pages: Vec<Page> = images
+			.into_iter()
+			.filter(|img| !img.url.is_empty())
+			.map(|img| Page {
+				content: PageContent::url(img.url),
+				..Default::default()
+			})
+			.collect();
 
 		Ok(pages)
 	}
