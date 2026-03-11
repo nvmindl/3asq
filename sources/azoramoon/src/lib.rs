@@ -369,7 +369,7 @@ impl ListingProvider for AzoraMoon {
 	fn get_manga_list(&self, listing: Listing, page: i32) -> Result<MangaPageResult> {
 		let url = match listing.id.as_str() {
 			"Popular" => format!(
-				"{}/posts?page={}&perPage={}&searchTerm=&isNovel=false&sortBy=popular",
+				"{}/query?page={}&perPage={}&orderBy=totalViews&orderDirection=desc",
 				API_URL, page, PAGE_SIZE
 			),
 			"New" => format!(
