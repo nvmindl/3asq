@@ -190,6 +190,76 @@ fn extract_rsc_array(text: &str, key: &str) -> Option<String> {
 	None
 }
 
+/// Extract the first numeric ID from RSC-escaped JSON (pattern: \"id\":NNN).
+fn extract_rsc_id(text: &str) -> Option<i64> {
+	let pattern = "\\\"id\\\":";
+	if let Some(start) = text.find(pattern) {
+		let val_start = start + pattern.len();
+		let remaining = &text[val_start..];
+		let end = remaining.find(|c: char| !c.is_ascii_digit()).unwrap_or(remaining.len());
+		if end > 0 {
+			return remaining[..end].parse::<i64>().ok();
+		}
+	}
+	None
+}
+
+/// Scrape the "Popular Today" carousel from the homepage.
+fn get_popular_list(page: i32) -> Result<MangaPageResult> {
+	if page > 1 {
+		return Ok(MangaPageResult {
+			entries: Vec::new(),
+			has_next_page: false,
+		});
+	}
+	let html = Request::get(BASE_URL)?.string()?;
+	let mut entries: Vec<Manga> = Vec::new();
+	let mut pos = 0;
+	// Parse swiper-slide cards from the popular carousel (first section on page)
+	while let Some(slide_off) = html[pos..].find("swiper-slide manga-swipe") {
+		let abs = pos + slide_off;
+		let slide_end = html[abs..].find("</a>").map(|e| abs + e + 4).unwrap_or(html.len());
+		let slide = &html[abs..slide_end];
+
+		// Stop if we've left the manga slider and hit the novels section
+		if slide.contains("alt=\"NOVEL\"") {
+			break;
+		}
+
+		let slug = extract_attr(slide, "href=\"/series/", '"');
+		let title = extract_attr(slide, "title=\"", '"');
+		let cover = extract_attr(slide, "src=\"", '"');
+
+		if let (Some(slug), Some(title)) = (slug, title) {
+			if !title.starts_with("Cover of") {
+				entries.push(Manga {
+					key: format!("0/{}", slug),
+					title: String::from(title),
+					cover: cover.map(|s| String::from(s)),
+					url: Some(format!("{}/series/{}", BASE_URL, slug)),
+					..Default::default()
+				});
+			}
+		}
+		pos = slide_end;
+	}
+	Ok(MangaPageResult {
+		entries,
+		has_next_page: false,
+	})
+}
+
+/// Extract the value of an attribute from an HTML snippet.
+fn extract_attr<'a>(html: &'a str, prefix: &str, end_char: char) -> Option<&'a str> {
+	if let Some(start) = html.find(prefix) {
+		let val_start = start + prefix.len();
+		if let Some(end) = html[val_start..].find(end_char) {
+			return Some(&html[val_start..val_start + end]);
+		}
+	}
+	None
+}
+
 // --- Source implementation ---
 
 impl Source for AzoraMoon {
@@ -222,6 +292,33 @@ impl Source for AzoraMoon {
 		needs_chapters: bool,
 	) -> Result<Manga> {
 		let (post_id, slug) = parse_key(&manga.key);
+
+		// Resolve post ID if unknown (from popular listing scrape)
+		if post_id == 0 {
+			let page_url = format!("{}/series/{}", BASE_URL, slug);
+			let html = Request::get(&page_url)?.string()?;
+			// Extract post ID from RSC data: \"id\":NNN (first occurrence)
+			if let Some(resolved_id) = extract_rsc_id(&html) {
+				let new_key = format!("{}/{}", resolved_id, slug);
+				manga.key = new_key;
+				return self.get_manga_update(manga, needs_details, needs_chapters);
+			}
+			// Fallback: search for the manga
+			let search_url = format!(
+				"{}/posts?page=1&perPage=5&searchTerm={}&isNovel=false",
+				API_URL,
+				encode_uri_component(&slug.replace('-', " "))
+			);
+			if let Ok(resp) = Request::get(&search_url)?.json_owned::<PostsResponse>() {
+				for post in resp.posts {
+					if post.slug == slug {
+						let new_key = format!("{}/{}", post.id, slug);
+						manga.key = new_key;
+						return self.get_manga_update(manga, needs_details, needs_chapters);
+					}
+				}
+			}
+		}
 
 		if needs_details {
 			let page_url = format!("{}/series/{}", BASE_URL, slug);
@@ -367,8 +464,10 @@ impl Source for AzoraMoon {
 
 impl ListingProvider for AzoraMoon {
 	fn get_manga_list(&self, listing: Listing, page: i32) -> Result<MangaPageResult> {
+		if listing.id.as_str() == "Popular" {
+			return get_popular_list(page);
+		}
 		let tag = match listing.id.as_str() {
-			"Hot" => "hot",
 			"New" => "new",
 			_ => "latestUpdate",
 		};
