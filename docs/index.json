@@ -16,9 +16,9 @@
     {
       "id": "ar.azoramoon",
       "name": "Azora Manga",
-      "version": 2,
-      "iconURL": "icons/ar.azoramoon-v2.png",
-      "downloadURL": "sources/ar.azoramoon-v2.aix",
+      "version": 3,
+      "iconURL": "icons/ar.azoramoon-v3.png",
+      "downloadURL": "sources/ar.azoramoon-v3.aix",
       "languages": [
         "ar"
       ],
