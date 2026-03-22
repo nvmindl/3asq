@@ -1,0 +1,38 @@
+name: Build & Release WASM Sources
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build sources
+        run: |
+          mkdir -p releases
+          cargo build --target wasm32-unknown-unknown --release
+          
+          # Copy compiled .wasm files
+          for source_dir in sources/*/; do
+            source_name=$(basename "$source_dir")
+            wasm_file="target/wasm32-unknown-unknown/release/aidoku_source_${source_name}.wasm"
+            if [ -f "$wasm_file" ]; then
+              cp "$wasm_file" "releases/${source_name}.wasm"
+              echo "✓ Built: $source_name"
+            fi
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-${{ github.run_number }}
+          files: releases/*.wasm
+          token: ${{ secrets.GITHUB_TOKEN }}
