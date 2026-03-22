@@ -1,4 +1,4 @@
-name: Build & Release WASM Sources
+name: Build WASM Sources
 
 on:
   push:
@@ -33,9 +33,9 @@ jobs:
             fi
           done
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: build-${{ github.run_number }}
-          files: releases/*.wasm
-          token: ${{ secrets.GITHUB_TOKEN }}
+          name: wasm-sources
+          path: releases/
+          retention-days: 90
