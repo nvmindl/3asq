@@ -92,7 +92,7 @@ impl Source for MeshManga {
                 };
 
                 entries.push(Manga {
-                    key: series.id.to_string(),
+                    key: format!("{}", series.id),
                     title: series.name,
                     cover: series.cover,
                     description: series.description,
@@ -126,7 +126,7 @@ impl Source for MeshManga {
 
                 for ch in chapters_data {
                     chapters.push(Chapter {
-                        key: ch.id.to_string(),
+                        key: format!("{}", ch.id),
                         title: ch.title,
                         chapter_number: ch.number,
                         url: Some(format!("{}/chapter/{}", BASE_URL, ch.id)),
@@ -193,7 +193,7 @@ impl ListingProvider for MeshManga {
                 };
 
                 entries.push(Manga {
-                    key: series.id.to_string(),
+                    key: format!("{}", series.id),
                     title: series.name,
                     cover: series.cover,
                     description: series.description,
@@ -223,7 +223,7 @@ impl DeepLinkHandler for MeshManga {
             let series_id = series_part.split('/').next().unwrap_or("");
             if !series_id.is_empty() && series_id.chars().all(|c| c.is_ascii_digit()) {
                 return Ok(Some(DeepLinkResult::Manga {
-                    key: series_id.to_string(),
+                    key: format!("{}", series_id),
                 }));
             }
         }
