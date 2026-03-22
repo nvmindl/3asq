@@ -2,6 +2,7 @@
 
 use aidoku::{
     alloc::{string::ToString, String, Vec},
+    helpers::uri::encode_uri_component,
     imports::{net::Request, std::parse_date},
     prelude::*,
     Chapter, DeepLinkHandler, DeepLinkResult, FilterValue, Listing, ListingProvider, Manga,
@@ -196,7 +197,7 @@ impl Source for MeshManga {
         let url = format!(
             "{}/series/?search={}&page={}&page_size={}",
             API_URL,
-            urlencoding_encode(&search_term),
+            encode_uri_component(&search_term),
             page,
             PAGE_SIZE
         );
@@ -407,24 +408,6 @@ fn parse_chapter_number(chapter_str: &str) -> Option<f32> {
     } else {
         Some(0.0)
     }
-}
-
-fn urlencoding_encode(input: &str) -> String {
-    let mut encoded = String::new();
-    for c in input.chars() {
-        match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => {
-                encoded.push(c);
-            }
-            ' ' => encoded.push_str("%20"),
-            _ => {
-                for byte in c.to_string().as_bytes() {
-                    encoded.push_str(&format!("%{:02X}", byte));
-                }
-            }
-        }
-    }
-    encoded
 }
 
 register_source!(MeshManga, ListingProvider, DeepLinkHandler);
