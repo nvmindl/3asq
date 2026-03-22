@@ -1,7 +1,7 @@
 [package]
 name = "aidoku-source-meshmanga"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
@@ -9,3 +9,4 @@ crate-type = ["cdylib"]
 [dependencies]
 aidoku = { git = "https://github.com/Aidoku/aidoku-rs", branch = "main", features = ["json"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }

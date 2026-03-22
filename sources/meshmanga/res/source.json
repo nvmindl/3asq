@@ -1,0 +1,20 @@
+{
+	"info": {
+		"id": "ar.meshmanga",
+		"name": "Mesh Manga",
+		"version": 1,
+		"url": "https://meshmanga.com",
+		"languages": ["ar"],
+		"contentRating": 1
+	},
+	"listings": [
+		{
+			"id": "Latest",
+			"name": "Latest"
+		},
+		{
+			"id": "Popular",
+			"name": "Popular"
+		}
+	]
+}
