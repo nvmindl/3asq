@@ -15,6 +15,9 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Add WASM target
+        run: rustup target add wasm32-unknown-unknown
+
       - name: Build sources
         run: |
           mkdir -p releases
