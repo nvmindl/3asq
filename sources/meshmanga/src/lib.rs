@@ -1,185 +1,86 @@
 #![no_std]
 
 use aidoku::{
-    alloc::{string::ToString, String, Vec},
-    helpers::uri::encode_uri_component,
-    imports::{net::Request, std::parse_date},
+    alloc::{String, Vec},
+    imports::{html::Element, net::Request},
     prelude::*,
     Chapter, DeepLinkHandler, DeepLinkResult, FilterValue, Listing, ListingProvider, Manga,
     MangaPageResult, MangaStatus, Page, PageContent, Result, Source, Viewer,
 };
-use serde::Deserialize;
 
-const API_URL: &str = "https://api.swatmanga.com";
 const BASE_URL: &str = "https://meshmanga.com";
-const PAGE_SIZE: usize = 20;
-
-#[derive(Deserialize)]
-struct ApiResponse<T> {
-    data: ApiData<T>,
-}
-
-#[derive(Deserialize)]
-struct ApiData<T> {
-    results: Vec<T>,
-    #[serde(rename = "next")]
-    next_page: Option<usize>,
-}
-
-#[derive(Deserialize)]
-struct SeriesResponse {
-    data: SeriesData,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct SeriesData {
-    id: i64,
-    title: String,
-    story: Option<String>,
-    poster: Option<Poster>,
-    #[serde(rename = "alternative-titles")]
-    alternative_titles: Option<Vec<String>>,
-    #[serde(rename = "type")]
-    series_type: Option<TypeData>,
-    status: Option<StatusData>,
-    author: Option<AuthorData>,
-    artist: Option<AuthorData>,
-    genres: Option<Vec<GenreData>>,
-    #[serde(rename = "chapters_count")]
-    chapters_count: i64,
-}
-
-#[derive(Deserialize)]
-struct Poster {
-    thumbnail: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TypeData {
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct StatusData {
-    name: String,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct AuthorData {
-    name: String,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct GenreData {
-    id: i64,
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct ChaptersResponse {
-    data: ChaptersData,
-}
-
-#[derive(Deserialize)]
-struct ChaptersData {
-    results: Vec<ChapterData>,
-    #[serde(rename = "next")]
-    next_page: Option<usize>,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct ChapterData {
-    id: i64,
-    chapter: String,
-    title: Option<String>,
-    #[serde(rename = "created_at")]
-    created_at: String,
-    #[serde(rename = "views_count")]
-    views_count: i64,
-    #[serde(rename = "images_count")]
-    images_count: i64,
-}
-
-#[derive(Deserialize)]
-struct ChapterPagesResponse {
-    data: ChapterPagesData,
-}
-
-#[derive(Deserialize)]
-struct ChapterPagesData {
-    images: Vec<ImageData>,
-}
-
-#[derive(Deserialize)]
-struct ImageData {
-    url: String,
-}
 
 struct MeshManga;
 
-fn series_to_manga(series: &SeriesData) -> Manga {
-    let status = series
-        .status
-        .as_ref()
-        .map(|s| {
-            let name = s.name.to_lowercase();
-            if name.contains("ongoing") || name.contains("مستمرة") {
-                MangaStatus::Ongoing
-            } else if name.contains("completed") || name.contains("مكتملة") {
-                MangaStatus::Completed
-            } else if name.contains("hiatus") || name.contains("متوقفة") {
-                MangaStatus::Hiatus
-            } else if name.contains("cancelled") || name.contains("ملغية") {
-                MangaStatus::Cancelled
-            } else {
-                MangaStatus::Unknown
-            }
-        })
-        .unwrap_or(MangaStatus::Unknown);
-
-    let viewer = series
-        .series_type
-        .as_ref()
-        .map(|t| {
-            let name = t.name.to_lowercase();
-            if name.contains("manhwa") || name.contains("webtoon") {
-                Viewer::Webtoon
-            } else {
-                Viewer::RightToLeft
-            }
-        })
-        .unwrap_or(Viewer::RightToLeft);
-
-    let tags: Vec<String> = series
-        .genres
-        .as_ref()
-        .map(|genres| {
-            genres
-                .iter()
-                .map(|g| g.name.clone())
-                .filter(|n| !n.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let cover = series.poster.as_ref().and_then(|p| p.thumbnail.clone());
-    let description = series.story.clone();
-
-    Manga {
-        key: series.id.to_string(),
-        title: series.title.clone(),
-        cover,
-        description,
-        status,
-        viewer,
-        tags: if tags.is_empty() { None } else { Some(tags) },
-        url: Some(format!("{}/series/{}", BASE_URL, series.id)),
-        ..Default::default()
+fn get_image_url(el: &Element) -> Option<String> {
+    let url = el
+        .attr("data-src")
+        .or_else(|| el.attr("src"))
+        .or_else(|| el.attr("srcset"))?;
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(String::from(trimmed))
     }
+}
+
+fn extract_manga_key(url: &str) -> Option<String> {
+    let stripped = url
+        .strip_prefix("https://meshmanga.com/series/")
+        .or_else(|| url.strip_prefix("http://meshmanga.com/series/"))
+        .or_else(|| url.strip_prefix("/series/"))?;
+    let key = stripped.trim_matches('/');
+    let key = key.split('/').next().unwrap_or(key);
+    if key.is_empty() || key.len() > 50 {
+        None
+    } else {
+        Some(String::from(key))
+    }
+}
+
+fn parse_manga_list_page(url: &str) -> Result<MangaPageResult> {
+    let html = Request::get(url)?.html()?;
+
+    let mut entries: Vec<Manga> = Vec::new();
+
+    if let Some(items) = html.select("div.border-dark\\/20.rounded-sm") {
+        for item in items {
+            let link = item.select_first("a").and_then(|a| a.attr("href"));
+            let href = match link {
+                Some(s) => s,
+                None => continue,
+            };
+            let key = match extract_manga_key(&href) {
+                Some(k) => k,
+                None => continue,
+            };
+
+            if key.is_empty() {
+                continue;
+            }
+
+            let title = item
+                .select_first("h3")
+                .and_then(|h| h.text())
+                .unwrap_or_default();
+
+            let cover = item.select_first("img").and_then(|img| get_image_url(&img));
+
+            entries.push(Manga {
+                key,
+                title,
+                cover,
+                ..Default::default()
+            });
+        }
+    }
+
+    let has_next_page = !entries.is_empty();
+    Ok(MangaPageResult {
+        entries,
+        has_next_page,
+    })
 }
 
 impl Source for MeshManga {
@@ -193,23 +94,16 @@ impl Source for MeshManga {
         page: i32,
         _filters: Vec<FilterValue>,
     ) -> Result<MangaPageResult> {
-        let search_term = query.unwrap_or_default();
-        let url = format!(
-            "{}/series/?search={}&page={}&page_size={}",
-            API_URL,
-            encode_uri_component(&search_term),
-            page,
-            PAGE_SIZE
-        );
-        let resp: ApiResponse<SeriesData> = Request::get(&url)?.json_owned()?;
-
-        let entries: Vec<Manga> = resp.data.results.iter().map(series_to_manga).collect();
-        let has_next_page = resp.data.next_page.is_some();
-
-        Ok(MangaPageResult {
-            entries,
-            has_next_page,
-        })
+        let url = if let Some(ref q) = query {
+            if !q.is_empty() {
+                format!("{}/?s={}&post_type=wp-manga&page={}", BASE_URL, q, page)
+            } else {
+                format!("{}/?s&post_type=wp-manga&page={}", BASE_URL, page)
+            }
+        } else {
+            format!("{}/?s&post_type=wp-manga&page={}", BASE_URL, page)
+        };
+        parse_manga_list_page(&url)
     }
 
     fn get_manga_update(
@@ -218,118 +112,107 @@ impl Source for MeshManga {
         needs_details: bool,
         needs_chapters: bool,
     ) -> Result<Manga> {
-        let series_id: i64 = manga.key.parse().unwrap_or(0);
+        let detail_url = format!("{}/series/{}/", BASE_URL, manga.key);
 
         if needs_details {
-            let detail_url = format!("{}/series/{}/", API_URL, series_id);
-            let resp: SeriesResponse = Request::get(&detail_url)?.json_owned()?;
-            let series = &resp.data;
+            let html = Request::get(&detail_url)?.html()?;
 
-            manga.title = series.title.clone();
-            manga.description = series.story.clone();
-            manga.cover = series.poster.as_ref().and_then(|p| p.thumbnail.clone());
-
-            manga.status = series
-                .status
-                .as_ref()
-                .map(|s| {
-                    let name = s.name.to_lowercase();
-                    if name.contains("ongoing") || name.contains("مستمرة") {
-                        MangaStatus::Ongoing
-                    } else if name.contains("completed") || name.contains("مكتملة") {
-                        MangaStatus::Completed
-                    } else if name.contains("hiatus") || name.contains("متوقفة") {
-                        MangaStatus::Hiatus
-                    } else if name.contains("cancelled") || name.contains("ملغية") {
-                        MangaStatus::Cancelled
-                    } else {
-                        MangaStatus::Unknown
-                    }
-                })
-                .unwrap_or(MangaStatus::Unknown);
-
-            manga.viewer = series
-                .series_type
-                .as_ref()
-                .map(|t| {
-                    let name = t.name.to_lowercase();
-                    if name.contains("manhwa") || name.contains("webtoon") {
-                        Viewer::Webtoon
-                    } else {
-                        Viewer::RightToLeft
-                    }
-                })
-                .unwrap_or(Viewer::RightToLeft);
-
-            let tags: Vec<String> = series
-                .genres
-                .as_ref()
-                .map(|genres| {
-                    genres
-                        .iter()
-                        .map(|g| g.name.clone())
-                        .filter(|n| !n.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !tags.is_empty() {
-                manga.tags = Some(tags);
+            if let Some(title_el) = html.select_first("h1.font-bold") {
+                manga.title = title_el.text().unwrap_or_default();
             }
 
-            manga.url = Some(format!("{}/series/{}", BASE_URL, series_id));
+            manga.cover = html
+                .select_first("img.rounded-sm")
+                .and_then(|img| get_image_url(&img));
+
+            if let Some(desc) = html.select_first("div.text-sm.text-gray-300") {
+                manga.description = desc.text();
+            }
+
+            if let Some(status_el) = html.select_first("div.flex.items-center.gap-2.mt-4") {
+                let status_text = status_el.text().unwrap_or_default().to_lowercase();
+                manga.status = if status_text.contains("مستمرة") || status_text.contains("ongoing")
+                {
+                    MangaStatus::Ongoing
+                } else if status_text.contains("مكتملة") || status_text.contains("completed")
+                {
+                    MangaStatus::Completed
+                } else {
+                    MangaStatus::Unknown
+                };
+            }
+
+            manga.url = Some(detail_url.clone());
+            manga.viewer = Viewer::RightToLeft;
         }
 
         if needs_chapters {
-            let mut all_chapters: Vec<Chapter> = Vec::new();
-            let mut current_page = 1;
-            let mut has_more = true;
+            let chapters_url = format!("{}/series/{}/", BASE_URL, manga.key);
+            let html = Request::get(&chapters_url)?.html()?;
 
-            while has_more {
-                let url = format!(
-                    "{}/chapters/?serie={}&page={}&page_size=50&order_by=-order",
-                    API_URL, series_id, current_page
-                );
-                let resp: ChaptersResponse = Request::get(&url)?.json_owned()?;
+            let mut chapters: Vec<Chapter> = Vec::new();
 
-                for ch in resp.data.results {
-                    let date = parse_date(&ch.created_at, "yyyy-MM-dd'T'HH:mm:ss");
+            if let Some(items) = html.select("div.rounded-md.bg-\\[\\#22242a\\]") {
+                for item in items {
+                    let link = item.select_first("a").and_then(|a| a.attr("href"));
+                    let ch_url = link.unwrap_or_default();
 
-                    all_chapters.push(Chapter {
-                        key: ch.id.to_string(),
-                        title: ch.title.filter(|s| !s.is_empty()),
-                        chapter_number: parse_chapter_number(&ch.chapter),
-                        date_uploaded: date,
-                        url: Some(format!("{}/chapter/{}", BASE_URL, ch.id)),
+                    let ch_key = ch_url
+                        .strip_prefix(BASE_URL)
+                        .unwrap_or(&ch_url)
+                        .trim_matches('/');
+
+                    if ch_key.is_empty() {
+                        continue;
+                    }
+
+                    let ch_text = item
+                        .select_first("h4")
+                        .and_then(|h| h.text())
+                        .unwrap_or_default();
+
+                    let chapter_number = parse_chapter_number(ch_key);
+
+                    chapters.push(Chapter {
+                        key: String::from(ch_key),
+                        title: Some(ch_text),
+                        chapter_number: Some(chapter_number),
+                        url: Some(format!("{}{}", BASE_URL, ch_key)),
                         language: Some(String::from("ar")),
                         ..Default::default()
                     });
                 }
-
-                has_more = resp.data.next_page.is_some();
-                current_page += 1;
             }
 
-            manga.chapters = Some(all_chapters);
+            manga.chapters = Some(chapters);
         }
 
         Ok(manga)
     }
 
     fn get_page_list(&self, _manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-        let chapter_id: i64 = chapter.key.parse().unwrap_or(0);
-        let url = format!("{}/chapters/{}/", API_URL, chapter_id);
-        let resp: ChapterPagesResponse = Request::get(&url)?.json_owned()?;
+        let url = if let Some(ref ch_url) = chapter.url {
+            ch_url.clone()
+        } else {
+            format!("{}/{}", BASE_URL, chapter.key)
+        };
 
-        let pages: Vec<Page> = resp
-            .data
-            .images
-            .into_iter()
-            .filter(|img| !img.url.is_empty())
-            .map(|img| Page {
-                content: PageContent::url(img.url),
-                ..Default::default()
-            })
-            .collect();
+        let html = Request::get(&url)?.html()?;
+
+        let mut pages: Vec<Page> = Vec::new();
+
+        if let Some(imgs) = html.select("img") {
+            for img in imgs {
+                if let Some(img_url) = get_image_url(&img) {
+                    if img_url.contains("meshmanga") || img_url.contains("swat") {
+                        pages.push(Page {
+                            content: PageContent::url(img_url),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
 
         Ok(pages)
     }
@@ -337,59 +220,31 @@ impl Source for MeshManga {
 
 impl ListingProvider for MeshManga {
     fn get_manga_list(&self, listing: Listing, page: i32) -> Result<MangaPageResult> {
-        let url = match listing.id.as_str() {
-            "Popular" => {
-                format!(
-                    "{}/series/?ordering=-views_count&page={}&page_size={}",
-                    API_URL, page, PAGE_SIZE
-                )
-            }
-            _ => {
-                format!(
-                    "{}/series/?ordering=-created_at&page={}&page_size={}",
-                    API_URL, page, PAGE_SIZE
-                )
-            }
+        let order = match listing.id.as_str() {
+            "Popular" => "views",
+            "Latest" | _ => "latest",
         };
-        let resp: ApiResponse<SeriesData> = Request::get(&url)?.json_owned()?;
-
-        let entries: Vec<Manga> = resp.data.results.iter().map(series_to_manga).collect();
-        let has_next_page = resp.data.next_page.is_some();
-
-        Ok(MangaPageResult {
-            entries,
-            has_next_page,
-        })
+        let url = format!(
+            "{}/menu/type/manga/?m_orderby={}&page={}",
+            BASE_URL, order, page
+        );
+        parse_manga_list_page(&url)
     }
 }
 
 impl DeepLinkHandler for MeshManga {
     fn handle_deep_link(&self, url: String) -> Result<Option<DeepLinkResult>> {
-        let series_id = url
-            .strip_prefix("https://meshmanga.com/series/")
-            .or_else(|| url.strip_prefix("http://meshmanga.com/series/"))
-            .unwrap_or("")
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .trim_matches('/');
-
-        if series_id.is_empty() {
-            return Ok(None);
+        let key = extract_manga_key(&url);
+        if let Some(key) = key {
+            Ok(Some(DeepLinkResult::Manga { key }))
+        } else {
+            Ok(None)
         }
-
-        if series_id.parse::<i64>().is_ok() {
-            return Ok(Some(DeepLinkResult::Manga {
-                key: String::from(series_id),
-            }));
-        }
-
-        Ok(None)
     }
 }
 
-fn parse_chapter_number(chapter_str: &str) -> Option<f32> {
-    let parts: Vec<&str> = chapter_str.split('-').collect();
+fn parse_chapter_number(slug: &str) -> f32 {
+    let parts: Vec<&str> = slug.split('-').collect();
     let mut number = 0.0_f32;
     let mut found = false;
     for part in parts {
@@ -403,11 +258,7 @@ fn parse_chapter_number(chapter_str: &str) -> Option<f32> {
             }
         }
     }
-    if found {
-        Some(number)
-    } else {
-        Some(0.0)
-    }
+    number
 }
 
 register_source!(MeshManga, ListingProvider, DeepLinkHandler);
