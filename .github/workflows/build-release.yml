@@ -7,6 +7,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -20,22 +22,25 @@ jobs:
 
       - name: Build sources
         run: |
-          mkdir -p releases
+          mkdir -p dist
           cargo build --target wasm32-unknown-unknown --release
           
-          # Copy compiled .wasm files
+          # Copy compiled .wasm files to dist
           for source_dir in sources/*/; do
             source_name=$(basename "$source_dir")
             wasm_file="target/wasm32-unknown-unknown/release/aidoku_source_${source_name}.wasm"
             if [ -f "$wasm_file" ]; then
-              cp "$wasm_file" "releases/${source_name}.wasm"
+              cp "$wasm_file" "dist/${source_name}.wasm"
               echo "✓ Built: $source_name"
+              ls -lah "dist/${source_name}.wasm"
             fi
           done
 
-      - name: Upload WASM artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: wasm-sources
-          path: releases/
-          retention-days: 90
+      - name: Commit and push WASM files
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add dist/*.wasm 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "Build: Update WASM source files" && git push)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
