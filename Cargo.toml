@@ -2,6 +2,7 @@
 members = [
 	"sources/3asq",
 	"sources/azoramoon",
+	"sources/meshmanga",
 ]
 resolver = "3"
 
