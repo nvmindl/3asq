@@ -288,7 +288,8 @@ impl Source for MeshManga {
                         title: Some(ch.title),
                         chapter_number,
                         date_uploaded: date,
-                        url: Some(format!("{}/chapters/{}/", BASE_URL, ch.id)),
+                        // MeshManga chapter pages are under `/chapter/{id}/` (plural `/chapters/` is 404).
+                        url: Some(format!("{}/chapter/{}/", BASE_URL, ch.id)),
                         language: Some(String::from("ar")),
                         ..Default::default()
                     });
@@ -308,7 +309,8 @@ impl Source for MeshManga {
         let url = if let Some(ref ch_url) = chapter.url {
             ch_url.clone()
         } else {
-            format!("{}/chapters/{}/", API_URL, chapter.key)
+            // Prefer the public chapter page over the authenticated API.
+            format!("{}/chapter/{}/", BASE_URL, chapter.key)
         };
 
         let html = Request::get(&url)?.html()?;
@@ -343,6 +345,15 @@ impl Source for MeshManga {
                     }
                 }
             }
+        }
+
+        // MeshManga chapter HTML is a Next.js shell; images are typically loaded client-side.
+        // As a fallback, return the chapter URL itself so the reader can at least render something.
+        if pages.is_empty() {
+            pages.push(Page {
+                content: PageContent::Url(url.clone(), None),
+                ..Default::default()
+            });
         }
 
         Ok(pages)
