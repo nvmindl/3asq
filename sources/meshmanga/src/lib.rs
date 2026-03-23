@@ -288,7 +288,7 @@ impl Source for MeshManga {
                         title: Some(ch.title),
                         chapter_number,
                         date_uploaded: date,
-                        url: Some(format!("{}/chapter/{}", BASE_URL, ch.id)),
+                        url: Some(format!("{}/chapters/{}/", BASE_URL, ch.id)),
                         language: Some(String::from("ar")),
                         ..Default::default()
                     });
@@ -305,31 +305,47 @@ impl Source for MeshManga {
     }
 
     fn get_page_list(&self, _manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-        let chapter_id: i64 = chapter.key.parse().unwrap_or(0);
-        let url = format!("{}/chapters/{}/", API_URL, chapter_id);
+        let url = if let Some(ref ch_url) = chapter.url {
+            ch_url.clone()
+        } else {
+            format!("{}/chapters/{}/", API_URL, chapter.key)
+        };
 
-        #[derive(Deserialize)]
-        struct ChapterDetail {
-            id: i64,
-            title: String,
-            slug: String,
-        }
+        let html = Request::get(&url)?.html()?;
 
-        match Request::get(&url)?.json_owned::<ChapterDetail>() {
-            Ok(_) => {
-                let pages: Vec<Page> = (1..=10)
-                    .map(|i| Page {
-                        content: PageContent::Url(
-                            format!("{}/api/chapter/{}/page/{}", API_URL, chapter_id, i),
-                            None,
-                        ),
-                        ..Default::default()
-                    })
-                    .collect();
-                Ok(pages)
+        let mut pages: Vec<Page> = Vec::new();
+
+        if let Some(imgs) = html.select("div.chapter-content img") {
+            for img in imgs {
+                if let Some(img_url) = img.attr("data-src").or_else(|| img.attr("src")) {
+                    let url_str = img_url.trim();
+                    if !url_str.is_empty() && !url_str.contains("data:image") {
+                        pages.push(Page {
+                            content: PageContent::Url(url_str.to_string(), None),
+                            ..Default::default()
+                        });
+                    }
+                }
             }
-            Err(_) => Ok(Vec::new()),
         }
+
+        if pages.is_empty() {
+            if let Some(imgs) = html.select("div.page-break img") {
+                for img in imgs {
+                    if let Some(img_url) = img.attr("data-src").or_else(|| img.attr("src")) {
+                        let url_str = img_url.trim();
+                        if !url_str.is_empty() && !url_str.contains("data:image") {
+                            pages.push(Page {
+                                content: PageContent::Url(url_str.to_string(), None),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(pages)
     }
 }
 
