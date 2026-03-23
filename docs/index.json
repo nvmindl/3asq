@@ -28,9 +28,9 @@
     {
       "id": "ar.meshmanga",
       "name": "MeshManga",
-      "version": 3,
-      "iconURL": "icons/ar.meshmanga-v1.png",
-      "downloadURL": "sources/ar.meshmanga-v3.aix",
+"version": 4,
+      "iconURL": "icons/ar.meshmanga-v4.png",
+      "downloadURL": "sources/ar.meshmanga-v4.aix",
       "languages": [
         "ar"
       ],
