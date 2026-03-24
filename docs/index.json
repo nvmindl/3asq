@@ -27,10 +27,10 @@
     },
     {
       "id": "ar.meshmanga",
-      "name": "MeshManga",
-      "version": 9,
-      "iconURL": "icons/ar.meshmanga-v9.png",
-      "downloadURL": "sources/ar.meshmanga-v9.aix",
+      "name": "Mesh Manga",
+      "version": 11,
+      "iconURL": "icons/ar.meshmanga-v11.png",
+      "downloadURL": "sources/ar.meshmanga-v11.aix",
       "languages": [
         "ar"
       ],
