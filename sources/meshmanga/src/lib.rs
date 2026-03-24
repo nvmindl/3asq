@@ -130,6 +130,20 @@ struct ChapterPage {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn ensure_absolute_url(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else if url.starts_with('/') {
+        format!("https://appswat.com{}", url)
+    } else {
+        format!("https://appswat.com/{}", url)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Source implementation
 // ---------------------------------------------------------------------------
 
@@ -339,7 +353,11 @@ fn series_to_manga(series: &SeriesData) -> Manga {
         })
         .collect();
 
-    let cover = series.poster.as_ref().and_then(|p| p.thumbnail.clone());
+    let cover = series
+        .poster
+        .as_ref()
+        .and_then(|p| p.thumbnail.as_ref())
+        .map(|s| ensure_absolute_url(s));
     let description = series.story.clone();
 
     let authors: Vec<String> = series
@@ -422,7 +440,11 @@ impl Source for MeshManga {
 
             manga.title = resp.title.clone();
             manga.description = resp.story.clone();
-            manga.cover = resp.poster.as_ref().and_then(|p| p.thumbnail.clone());
+            manga.cover = resp
+                .poster
+                .as_ref()
+                .and_then(|p| p.thumbnail.as_ref())
+                .map(|s| ensure_absolute_url(s));
 
             manga.status = resp
                 .status
@@ -473,7 +495,7 @@ impl Source for MeshManga {
                 manga.tags = Some(tags);
             }
 
-            manga.url = Some(format!("{}/series/{}", BASE_URL, series_id));
+            manga.url = Some(format!("{}/series/{}", BASE_URL, resp.slug));
         }
 
         if needs_chapters {
@@ -526,7 +548,7 @@ impl Source for MeshManga {
                     let url_str = img_url.trim();
                     if !url_str.is_empty() {
                         pages.push(Page {
-                            content: PageContent::Url(url_str.to_string(), None),
+                            content: PageContent::Url(ensure_absolute_url(url_str), None),
                             ..Default::default()
                         });
                     }

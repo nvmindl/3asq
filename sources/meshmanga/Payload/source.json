@@ -2,7 +2,7 @@
 	"info": {
 		"id": "ar.meshmanga",
 		"name": "Mesh Manga",
-		"version": 9,
+		"version": 10,
 		"url": "https://meshmanga.com",
 		"languages": ["ar"],
 		"contentRating": 1
