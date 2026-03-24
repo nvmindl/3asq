@@ -3,7 +3,11 @@
 use aidoku::{
     alloc::{string::ToString, vec, String, Vec},
     helpers::uri::encode_uri_component,
-    imports::{net::Request, std::parse_date},
+    imports::{
+        defaults::{defaults_get, defaults_set, DefaultValue},
+        net::Request,
+        std::parse_date,
+    },
     prelude::*,
     Chapter, DeepLinkHandler, DeepLinkResult, FilterValue, Listing, ListingProvider, Manga,
     MangaPageResult, MangaStatus, Page, PageContent, Result, Source, Viewer,
@@ -13,6 +17,10 @@ use serde::Deserialize;
 const API_URL: &str = "https://appswat.com/v2/api/v2";
 const BASE_URL: &str = "https://meshmanga.com";
 const PAGE_SIZE: usize = 20;
+
+// ---------------------------------------------------------------------------
+// API data models
+// ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct ApiResponse<T> {
@@ -83,7 +91,209 @@ struct ChapterListItem {
     created_at: String,
 }
 
+// ---------------------------------------------------------------------------
+// Auth models
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access: String,
+    refresh: String,
+}
+
+#[derive(Deserialize)]
+struct RefreshResponse {
+    access: String,
+}
+
+// ---------------------------------------------------------------------------
+// Chapter detail model (returned by GET chapters/{id}/)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ChapterDetail {
+    id: i64,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    chapter: Option<String>,
+    #[serde(default)]
+    pages: Vec<ChapterPage>,
+}
+
+#[derive(Deserialize)]
+struct ChapterPage {
+    #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
+    page_number: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Source implementation
+// ---------------------------------------------------------------------------
+
 struct MeshManga;
+
+/// Obtain a valid access token. Tries (in order):
+/// 1. Cached access token from defaults
+/// 2. Refresh via cached refresh token
+/// 3. Fresh login with username/password from settings
+fn get_access_token() -> Option<String> {
+    // 1) Try cached access token
+    if let Some(token) = defaults_get::<String>("meshmanga.access_token") {
+        if !token.is_empty() {
+            // Quick check: try to use it. If it fails we'll fall through to refresh/login.
+            return Some(token);
+        }
+    }
+
+    // 2) Try refresh
+    if let Some(refresh) = defaults_get::<String>("meshmanga.refresh_token") {
+        if !refresh.is_empty() {
+            if let Some(token) = try_refresh_token(&refresh) {
+                return Some(token);
+            }
+        }
+    }
+
+    // 3) Fresh login
+    try_login()
+}
+
+/// Attempt to refresh the access token using the stored refresh token.
+fn try_refresh_token(refresh: &str) -> Option<String> {
+    let body = format!("{{\"refresh\":\"{}\"}}", refresh);
+    let url = format!("{}/token/refresh/", API_URL);
+    let req = match Request::post(&url) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+    let resp = req
+        .header("Content-Type", "application/json")
+        .body(body.as_bytes())
+        .send();
+
+    if let Ok(mut resp) = resp {
+        if let Ok(data) = resp.get_json::<RefreshResponse>() {
+            defaults_set(
+                "meshmanga.access_token",
+                DefaultValue::String(data.access.clone()),
+            );
+            return Some(data.access);
+        }
+    }
+
+    // Refresh failed — clear stale tokens so next call does a fresh login
+    defaults_set("meshmanga.access_token", DefaultValue::Null);
+    defaults_set("meshmanga.refresh_token", DefaultValue::Null);
+    None
+}
+
+/// Perform a fresh login using credentials from source settings.
+fn try_login() -> Option<String> {
+    let username: String = defaults_get("username").unwrap_or_default();
+    let password: String = defaults_get("password").unwrap_or_default();
+
+    if username.is_empty() || password.is_empty() {
+        return None;
+    }
+
+    let body = format!(
+        "{{\"username\":\"{}\",\"password\":\"{}\"}}",
+        username, password
+    );
+    let url = format!("{}/token/", API_URL);
+    let req = match Request::post(&url) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+    let resp = req
+        .header("Content-Type", "application/json")
+        .body(body.as_bytes())
+        .send();
+
+    if let Ok(mut resp) = resp {
+        if let Ok(data) = resp.get_json::<TokenResponse>() {
+            defaults_set(
+                "meshmanga.access_token",
+                DefaultValue::String(data.access.clone()),
+            );
+            defaults_set(
+                "meshmanga.refresh_token",
+                DefaultValue::String(data.refresh.clone()),
+            );
+            return Some(data.access);
+        }
+    }
+
+    None
+}
+
+/// Fetch chapter pages from the authenticated API.
+/// If the cached token is rejected (401), retry once after refreshing/re-logging in.
+fn fetch_chapter_pages(chapter_id: &str) -> Option<Vec<ChapterPage>> {
+    // First attempt
+    if let Some(token) = get_access_token() {
+        let url = format!("{}/chapters/{}/", API_URL, chapter_id);
+        let resp = match Request::get(&url) {
+            Ok(r) => r.header("Authorization", &format!("Bearer {}", token)).send(),
+            Err(_) => return None,
+        };
+
+        if let Ok(mut resp) = resp {
+            if let Ok(detail) = resp.get_json::<ChapterDetail>() {
+                return Some(detail.pages);
+            }
+            // If the request came back but deserialization failed or we got an error,
+            // the token might be expired. Clear it and retry.
+        }
+
+        // Clear cached token and retry with a fresh one
+        defaults_set("meshmanga.access_token", DefaultValue::Null);
+    }
+
+    // Second attempt: force re-auth
+    // Try refresh first
+    if let Some(refresh) = defaults_get::<String>("meshmanga.refresh_token") {
+        if !refresh.is_empty() {
+            if let Some(new_token) = try_refresh_token(&refresh) {
+                let url = format!("{}/chapters/{}/", API_URL, chapter_id);
+                let req = match Request::get(&url) {
+                    Ok(r) => r,
+                    Err(_) => return None,
+                };
+                if let Ok(mut resp) = req
+                    .header("Authorization", &format!("Bearer {}", new_token))
+                    .send()
+                {
+                    if let Ok(detail) = resp.get_json::<ChapterDetail>() {
+                        return Some(detail.pages);
+                    }
+                }
+            }
+        }
+    }
+
+    // Last resort: full re-login
+    if let Some(new_token) = try_login() {
+        let url = format!("{}/chapters/{}/", API_URL, chapter_id);
+        let req = match Request::get(&url) {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+        if let Ok(mut resp) = req
+            .header("Authorization", &format!("Bearer {}", new_token))
+            .send()
+        {
+            if let Ok(detail) = resp.get_json::<ChapterDetail>() {
+                return Some(detail.pages);
+            }
+        }
+    }
+
+    None
+}
 
 fn series_to_manga(series: &SeriesData) -> Manga {
     let status = series
@@ -288,7 +498,6 @@ impl Source for MeshManga {
                         title: Some(ch.title),
                         chapter_number,
                         date_uploaded: date,
-                        // MeshManga chapter pages are under `/chapter/{id}/` (plural `/chapters/` is 404).
                         url: Some(format!("{}/chapter/{}/", BASE_URL, ch.id)),
                         language: Some(String::from("ar")),
                         ..Default::default()
@@ -306,22 +515,16 @@ impl Source for MeshManga {
     }
 
     fn get_page_list(&self, _manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-        let url = if let Some(ref ch_url) = chapter.url {
-            ch_url.clone()
-        } else {
-            // Prefer the public chapter page over the authenticated API.
-            format!("{}/chapter/{}/", BASE_URL, chapter.key)
-        };
+        let chapter_id = &chapter.key;
 
-        let html = Request::get(&url)?.html()?;
+        // Fetch chapter pages via the authenticated API
+        if let Some(chapter_pages) = fetch_chapter_pages(chapter_id) {
+            let mut pages: Vec<Page> = Vec::new();
 
-        let mut pages: Vec<Page> = Vec::new();
-
-        if let Some(imgs) = html.select("div.chapter-content img") {
-            for img in imgs {
-                if let Some(img_url) = img.attr("data-src").or_else(|| img.attr("src")) {
+            for cp in chapter_pages {
+                if let Some(ref img_url) = cp.image {
                     let url_str = img_url.trim();
-                    if !url_str.is_empty() && !url_str.contains("data:image") {
+                    if !url_str.is_empty() {
                         pages.push(Page {
                             content: PageContent::Url(url_str.to_string(), None),
                             ..Default::default()
@@ -329,34 +532,15 @@ impl Source for MeshManga {
                     }
                 }
             }
-        }
 
-        if pages.is_empty() {
-            if let Some(imgs) = html.select("div.page-break img") {
-                for img in imgs {
-                    if let Some(img_url) = img.attr("data-src").or_else(|| img.attr("src")) {
-                        let url_str = img_url.trim();
-                        if !url_str.is_empty() && !url_str.contains("data:image") {
-                            pages.push(Page {
-                                content: PageContent::Url(url_str.to_string(), None),
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
+            if !pages.is_empty() {
+                return Ok(pages);
             }
         }
 
-        // MeshManga chapter HTML is a Next.js shell; images are typically loaded client-side.
-        // As a fallback, return the chapter URL itself so the reader can at least render something.
-        if pages.is_empty() {
-            pages.push(Page {
-                content: PageContent::Url(url.clone(), None),
-                ..Default::default()
-            });
-        }
-
-        Ok(pages)
+        // If API failed (no credentials / auth error), return an empty list.
+        // The user needs to configure their login credentials in source settings.
+        Ok(Vec::new())
     }
 }
 

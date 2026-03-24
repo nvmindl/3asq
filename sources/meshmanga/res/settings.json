@@ -1,0 +1,18 @@
+[
+	{
+		"type": "group",
+		"title": "Login",
+		"items": [
+			{
+				"type": "text",
+				"key": "username",
+				"title": "Username / Email"
+			},
+			{
+				"type": "text",
+				"key": "password",
+				"title": "Password"
+			}
+		]
+	}
+]
