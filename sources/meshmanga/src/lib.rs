@@ -1,7 +1,7 @@
 #![no_std]
 
 use aidoku::{
-    alloc::{string::ToString, vec, String, Vec},
+    alloc::{String, Vec},
     helpers::uri::encode_uri_component,
     imports::{
         defaults::{defaults_get, defaults_set, DefaultValue},
@@ -15,8 +15,10 @@ use aidoku::{
 use serde::Deserialize;
 
 const API_URL: &str = "https://appswat.com/v2/api/v2";
+const MEDIA_URL: &str = "https://appswat.com/v2/media/series";
 const BASE_URL: &str = "https://meshmanga.com";
 const PAGE_SIZE: usize = 20;
+const MAX_PAGES: i32 = 300;
 
 // ---------------------------------------------------------------------------
 // API data models
@@ -24,8 +26,10 @@ const PAGE_SIZE: usize = 20;
 
 #[derive(Deserialize)]
 struct ApiResponse<T> {
+    #[allow(dead_code)]
     count: i64,
     next: Option<String>,
+    #[allow(dead_code)]
     previous: Option<String>,
     results: Vec<T>,
 }
@@ -44,12 +48,11 @@ struct SeriesData {
     status: Option<StatusData>,
     #[serde(default)]
     genres: Vec<GenreData>,
+    #[allow(dead_code)]
     #[serde(rename = "chapters_count")]
     chapters_count: Option<i64>,
     #[serde(default)]
     author: Option<AuthorData>,
-    #[serde(rename = "created_at")]
-    created_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -82,17 +85,17 @@ struct AuthorData {
 struct ChapterListItem {
     id: i64,
     title: String,
+    #[allow(dead_code)]
     slug: String,
     chapter: String,
+    #[allow(dead_code)]
     serie: i64,
-    #[serde(rename = "views_count")]
-    views_count: Option<i64>,
     #[serde(rename = "created_at")]
     created_at: String,
 }
 
 // ---------------------------------------------------------------------------
-// Auth models
+// Auth models (for fallback)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -106,17 +109,10 @@ struct RefreshResponse {
     access: String,
 }
 
-// ---------------------------------------------------------------------------
-// Chapter detail model (returned by GET chapters/{id}/)
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 struct ChapterDetail {
+    #[allow(dead_code)]
     id: i64,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    chapter: Option<String>,
     #[serde(default)]
     pages: Vec<ChapterPage>,
 }
@@ -125,17 +121,79 @@ struct ChapterDetail {
 struct ChapterPage {
     #[serde(default)]
     image: Option<String>,
-    #[serde(default)]
-    page_number: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Extract the media folder name from the poster URL.
+/// Newer series have poster URLs like .../series/{folder_name}/poster*
+fn extract_media_folder(series: &SeriesData) -> Option<String> {
+    let poster = series.poster.as_ref()?;
+    let url = poster.thumbnail.as_ref().or(poster.medium.as_ref())?;
+    let after = url.split("/series/").nth(1)?;
+    let folder = after.split('/').next()?;
+    if folder.is_empty() {
+        None
+    } else {
+        Some(String::from(folder))
+    }
+}
+
+/// Parse the integer chapter number from strings like "26", "10 Free", "267 FREE".
+fn parse_chapter_int(chapter_str: &str) -> i32 {
+    let mut num = String::new();
+    let mut found = false;
+    for c in chapter_str.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+            found = true;
+        } else if found {
+            break;
+        }
+    }
+    num.parse().unwrap_or(0)
+}
+
+/// Check if a URL returns a successful HTTP response using a HEAD request.
+fn url_exists(url: &str) -> bool {
+    match Request::head(url) {
+        Ok(req) => match req.send() {
+            Ok(resp) => {
+                let code = resp.status_code();
+                code >= 200 && code < 400
+            }
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+/// Find the maximum page number using binary search with HEAD requests.
+fn find_max_page(base_url: &str) -> i32 {
+    if !url_exists(&format!("{}/0001.webp", base_url)) {
+        return 0;
+    }
+
+    let mut low = 1_i32;
+    let mut high = MAX_PAGES;
+
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        if url_exists(&format!("{}/{:04}.webp", base_url, mid)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    low
+}
+
 fn ensure_absolute_url(url: &str) -> String {
     if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_string()
+        String::from(url)
     } else if url.starts_with('/') {
         format!("https://appswat.com{}", url)
     } else {
@@ -143,214 +201,69 @@ fn ensure_absolute_url(url: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Source implementation
-// ---------------------------------------------------------------------------
-
-struct MeshManga;
-
-/// Obtain a valid access token. Tries (in order):
-/// 1. Cached access token from defaults
-/// 2. Refresh via cached refresh token
-/// 3. Fresh login with username/password from settings
-fn get_access_token() -> Option<String> {
-    // 1) Try cached access token
-    if let Some(token) = defaults_get::<String>("meshmanga.access_token") {
-        if !token.is_empty() {
-            // Quick check: try to use it. If it fails we'll fall through to refresh/login.
-            return Some(token);
-        }
+fn parse_status(name: &str) -> MangaStatus {
+    let lower = name.to_lowercase();
+    if lower.contains("ongoing") || lower.contains("\u{0645}\u{0633}\u{062a}\u{0645}\u{0631}\u{0629}") {
+        MangaStatus::Ongoing
+    } else if lower.contains("completed") || lower.contains("\u{0645}\u{0643}\u{062a}\u{0645}\u{0644}\u{0629}") {
+        MangaStatus::Completed
+    } else if lower.contains("hiatus") || lower.contains("\u{0645}\u{062a}\u{0648}\u{0642}\u{0641}\u{0629}") {
+        MangaStatus::Hiatus
+    } else {
+        MangaStatus::Unknown
     }
-
-    // 2) Try refresh
-    if let Some(refresh) = defaults_get::<String>("meshmanga.refresh_token") {
-        if !refresh.is_empty() {
-            if let Some(token) = try_refresh_token(&refresh) {
-                return Some(token);
-            }
-        }
-    }
-
-    // 3) Fresh login
-    try_login()
 }
 
-/// Attempt to refresh the access token using the stored refresh token.
-fn try_refresh_token(refresh: &str) -> Option<String> {
-    let body = format!("{{\"refresh\":\"{}\"}}", refresh);
-    let url = format!("{}/token/refresh/", API_URL);
-    let req = match Request::post(&url) {
-        Ok(r) => r,
-        Err(_) => return None,
-    };
-    let resp = req
-        .header("Content-Type", "application/json")
-        .body(body.as_bytes())
-        .send();
-
-    if let Ok(mut resp) = resp {
-        if let Ok(data) = resp.get_json::<RefreshResponse>() {
-            defaults_set(
-                "meshmanga.access_token",
-                DefaultValue::String(data.access.clone()),
-            );
-            return Some(data.access);
-        }
+fn parse_viewer(type_name: &str) -> Viewer {
+    let lower = type_name.to_lowercase();
+    if lower.contains("manhwa") || lower.contains("webtoon") || lower.contains("manhua") {
+        Viewer::Webtoon
+    } else {
+        Viewer::RightToLeft
     }
-
-    // Refresh failed — clear stale tokens so next call does a fresh login
-    defaults_set("meshmanga.access_token", DefaultValue::Null);
-    defaults_set("meshmanga.refresh_token", DefaultValue::Null);
-    None
 }
 
-/// Perform a fresh login using credentials from source settings.
-fn try_login() -> Option<String> {
-    let username: String = defaults_get("username").unwrap_or_default();
-    let password: String = defaults_get("password").unwrap_or_default();
-
-    if username.is_empty() || password.is_empty() {
-        return None;
-    }
-
-    let body = format!(
-        "{{\"username\":\"{}\",\"password\":\"{}\"}}",
-        username, password
-    );
-    let url = format!("{}/token/", API_URL);
-    let req = match Request::post(&url) {
-        Ok(r) => r,
-        Err(_) => return None,
-    };
-    let resp = req
-        .header("Content-Type", "application/json")
-        .body(body.as_bytes())
-        .send();
-
-    if let Ok(mut resp) = resp {
-        if let Ok(data) = resp.get_json::<TokenResponse>() {
-            defaults_set(
-                "meshmanga.access_token",
-                DefaultValue::String(data.access.clone()),
-            );
-            defaults_set(
-                "meshmanga.refresh_token",
-                DefaultValue::String(data.refresh.clone()),
-            );
-            return Some(data.access);
+fn parse_chapter_number(chapter_str: &str) -> Option<f32> {
+    for part in chapter_str.split_whitespace() {
+        if let Ok(val) = part.parse::<f32>() {
+            return Some(val);
         }
     }
-
-    None
-}
-
-/// Fetch chapter pages from the authenticated API.
-/// If the cached token is rejected (401), retry once after refreshing/re-logging in.
-fn fetch_chapter_pages(chapter_id: &str) -> Option<Vec<ChapterPage>> {
-    // First attempt
-    if let Some(token) = get_access_token() {
-        let url = format!("{}/chapters/{}/", API_URL, chapter_id);
-        let resp = match Request::get(&url) {
-            Ok(r) => r.header("Authorization", &format!("Bearer {}", token)).send(),
-            Err(_) => return None,
-        };
-
-        if let Ok(mut resp) = resp {
-            if let Ok(detail) = resp.get_json::<ChapterDetail>() {
-                return Some(detail.pages);
-            }
-            // If the request came back but deserialization failed or we got an error,
-            // the token might be expired. Clear it and retry.
-        }
-
-        // Clear cached token and retry with a fresh one
-        defaults_set("meshmanga.access_token", DefaultValue::Null);
-    }
-
-    // Second attempt: force re-auth
-    // Try refresh first
-    if let Some(refresh) = defaults_get::<String>("meshmanga.refresh_token") {
-        if !refresh.is_empty() {
-            if let Some(new_token) = try_refresh_token(&refresh) {
-                let url = format!("{}/chapters/{}/", API_URL, chapter_id);
-                let req = match Request::get(&url) {
-                    Ok(r) => r,
-                    Err(_) => return None,
-                };
-                if let Ok(mut resp) = req
-                    .header("Authorization", &format!("Bearer {}", new_token))
-                    .send()
-                {
-                    if let Ok(detail) = resp.get_json::<ChapterDetail>() {
-                        return Some(detail.pages);
-                    }
-                }
+    let parts: Vec<&str> = chapter_str.split('-').collect();
+    let mut number = 0.0_f32;
+    let mut found = false;
+    for part in parts {
+        if let Ok(val) = part.parse::<f32>() {
+            if found {
+                number += val / 10.0;
+                break;
+            } else {
+                number = val;
+                found = true;
             }
         }
     }
-
-    // Last resort: full re-login
-    if let Some(new_token) = try_login() {
-        let url = format!("{}/chapters/{}/", API_URL, chapter_id);
-        let req = match Request::get(&url) {
-            Ok(r) => r,
-            Err(_) => return None,
-        };
-        if let Ok(mut resp) = req
-            .header("Authorization", &format!("Bearer {}", new_token))
-            .send()
-        {
-            if let Ok(detail) = resp.get_json::<ChapterDetail>() {
-                return Some(detail.pages);
-            }
-        }
-    }
-
-    None
+    if found { Some(number) } else { Some(0.0) }
 }
 
 fn series_to_manga(series: &SeriesData) -> Manga {
     let status = series
         .status
         .as_ref()
-        .map(|s| {
-            let name = s.name.to_lowercase();
-            if name.contains("ongoing") || name.contains("مستمرة") {
-                MangaStatus::Ongoing
-            } else if name.contains("completed") || name.contains("مكتملة") {
-                MangaStatus::Completed
-            } else if name.contains("hiatus") || name.contains("متوقفة") {
-                MangaStatus::Hiatus
-            } else {
-                MangaStatus::Unknown
-            }
-        })
+        .map(|s| parse_status(&s.name))
         .unwrap_or(MangaStatus::Unknown);
 
     let viewer = series
         .series_type
         .as_ref()
-        .map(|t| {
-            let name = t.name.to_lowercase();
-            if name.contains("manhwa") || name.contains("webtoon") || name.contains("manhua") {
-                Viewer::Webtoon
-            } else {
-                Viewer::RightToLeft
-            }
-        })
+        .map(|t| parse_viewer(&t.name))
         .unwrap_or(Viewer::RightToLeft);
 
     let tags: Vec<String> = series
         .genres
         .iter()
-        .filter_map(|g| {
-            let name = &g.name;
-            if name.is_empty() {
-                None
-            } else {
-                Some(name.clone())
-            }
-        })
+        .filter(|g| !g.name.is_empty())
+        .map(|g| g.name.clone())
         .collect();
 
     let cover = series
@@ -358,38 +271,144 @@ fn series_to_manga(series: &SeriesData) -> Manga {
         .as_ref()
         .and_then(|p| p.thumbnail.as_ref())
         .map(|s| ensure_absolute_url(s));
-    let description = series.story.clone();
 
     let authors: Vec<String> = series
         .author
         .as_ref()
         .and_then(|a| a.name.clone())
-        .map(|n| {
-            if n.is_empty() {
-                vec![]
-            } else {
-                vec![n.clone()]
-            }
-        })
-        .unwrap_or_default();
+        .filter(|n| !n.is_empty())
+        .into_iter()
+        .collect();
 
     Manga {
-        key: series.id.to_string(),
+        key: format!("{}", series.id),
         title: series.title.clone(),
         cover,
-        description,
+        description: series.story.clone(),
         status,
         viewer,
         tags: if tags.is_empty() { None } else { Some(tags) },
-        authors: if authors.is_empty() {
-            None
-        } else {
-            Some(authors)
-        },
+        authors: if authors.is_empty() { None } else { Some(authors) },
         url: Some(format!("{}/series/{}", BASE_URL, series.slug)),
         ..Default::default()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Auth helpers (fallback for older series without direct media URLs)
+// ---------------------------------------------------------------------------
+
+fn get_access_token() -> Option<String> {
+    if let Some(token) = defaults_get::<String>("meshmanga.access_token") {
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+    if let Some(refresh) = defaults_get::<String>("meshmanga.refresh_token") {
+        if !refresh.is_empty() {
+            if let Some(token) = try_refresh_token(&refresh) {
+                return Some(token);
+            }
+        }
+    }
+    try_login()
+}
+
+fn try_refresh_token(refresh: &str) -> Option<String> {
+    let body = format!("{{\"refresh\":\"{}\"}}", refresh);
+    let url = format!("{}/token/refresh/", API_URL);
+    let req = Request::post(&url).ok()?;
+    let mut resp = req
+        .header("Content-Type", "application/json")
+        .body(body.as_bytes())
+        .send()
+        .ok()?;
+    let data = resp.get_json::<RefreshResponse>().ok()?;
+    defaults_set("meshmanga.access_token", DefaultValue::String(data.access.clone()));
+    Some(data.access)
+}
+
+fn try_login() -> Option<String> {
+    let username: String = defaults_get("username").unwrap_or_default();
+    let password: String = defaults_get("password").unwrap_or_default();
+    if username.is_empty() || password.is_empty() {
+        return None;
+    }
+    let body = format!(
+        "{{\"username\":\"{}\",\"password\":\"{}\"}}",
+        username, password
+    );
+    let url = format!("{}/token/", API_URL);
+    let req = Request::post(&url).ok()?;
+    let mut resp = req
+        .header("Content-Type", "application/json")
+        .body(body.as_bytes())
+        .send()
+        .ok()?;
+    let data = resp.get_json::<TokenResponse>().ok()?;
+    defaults_set("meshmanga.access_token", DefaultValue::String(data.access.clone()));
+    defaults_set("meshmanga.refresh_token", DefaultValue::String(data.refresh.clone()));
+    Some(data.access)
+}
+
+fn fetch_chapter_pages_auth(chapter_id: &str) -> Option<Vec<Page>> {
+    let token = get_access_token()?;
+    let url = format!("{}/chapters/{}/", API_URL, chapter_id);
+    let resp = Request::get(&url)
+        .ok()?
+        .header("Authorization", &format!("Bearer {}", token))
+        .send();
+
+    if let Ok(mut resp) = resp {
+        if let Ok(detail) = resp.get_json::<ChapterDetail>() {
+            let pages: Vec<Page> = detail
+                .pages
+                .iter()
+                .filter_map(|cp| {
+                    let url_str = cp.image.as_ref()?.trim();
+                    if url_str.is_empty() { return None; }
+                    Some(Page {
+                        content: PageContent::Url(ensure_absolute_url(url_str), None),
+                        ..Default::default()
+                    })
+                })
+                .collect();
+            if !pages.is_empty() {
+                return Some(pages);
+            }
+        }
+    }
+
+    // Token might be stale, clear and retry once
+    defaults_set("meshmanga.access_token", DefaultValue::Null);
+    let token = get_access_token()?;
+    let url = format!("{}/chapters/{}/", API_URL, chapter_id);
+    let mut resp = Request::get(&url)
+        .ok()?
+        .header("Authorization", &format!("Bearer {}", token))
+        .send()
+        .ok()?;
+    let detail = resp.get_json::<ChapterDetail>().ok()?;
+    let pages: Vec<Page> = detail
+        .pages
+        .iter()
+        .filter_map(|cp| {
+            let url_str = cp.image.as_ref()?.trim();
+            if url_str.is_empty() { return None; }
+            Some(Page {
+                content: PageContent::Url(ensure_absolute_url(url_str), None),
+                ..Default::default()
+            })
+        })
+        .collect();
+    if pages.is_empty() { None } else { Some(pages) }
+}
+
+// ---------------------------------------------------------------------------
+// Source implementation
+// ---------------------------------------------------------------------------
+
+struct MeshManga;
 
 impl Source for MeshManga {
     fn new() -> Self {
@@ -416,14 +435,10 @@ impl Source for MeshManga {
         };
 
         let resp: ApiResponse<SeriesData> = Request::get(&url)?.json_owned()?;
-
         let entries: Vec<Manga> = resp.results.iter().map(series_to_manga).collect();
         let has_next_page = resp.next.is_some();
 
-        Ok(MangaPageResult {
-            entries,
-            has_next_page,
-        })
+        Ok(MangaPageResult { entries, has_next_page })
     }
 
     fn get_manga_update(
@@ -434,71 +449,54 @@ impl Source for MeshManga {
     ) -> Result<Manga> {
         let series_id: i64 = manga.key.parse().unwrap_or(0);
 
+        // Fetch series detail when needed (for details or to get poster URL for chapters)
+        let series_resp: Option<SeriesData> = if needs_details || needs_chapters {
+            let url = format!("{}/series/{}/", API_URL, series_id);
+            Some(Request::get(&url)?.json_owned()?)
+        } else {
+            None
+        };
+
         if needs_details {
-            let detail_url = format!("{}/series/{}/", API_URL, series_id);
-            let resp: SeriesData = Request::get(&detail_url)?.json_owned()?;
+            if let Some(ref resp) = series_resp {
+                manga.title = resp.title.clone();
+                manga.description = resp.story.clone();
+                manga.cover = resp
+                    .poster
+                    .as_ref()
+                    .and_then(|p| p.thumbnail.as_ref())
+                    .map(|s| ensure_absolute_url(s));
 
-            manga.title = resp.title.clone();
-            manga.description = resp.story.clone();
-            manga.cover = resp
-                .poster
-                .as_ref()
-                .and_then(|p| p.thumbnail.as_ref())
-                .map(|s| ensure_absolute_url(s));
+                manga.status = resp
+                    .status
+                    .as_ref()
+                    .map(|s| parse_status(&s.name))
+                    .unwrap_or(MangaStatus::Unknown);
 
-            manga.status = resp
-                .status
-                .as_ref()
-                .map(|s| {
-                    let name = s.name.to_lowercase();
-                    if name.contains("ongoing") || name.contains("مستمرة") {
-                        MangaStatus::Ongoing
-                    } else if name.contains("completed") || name.contains("مكتملة") {
-                        MangaStatus::Completed
-                    } else if name.contains("hiatus") || name.contains("متوقفة") {
-                        MangaStatus::Hiatus
-                    } else {
-                        MangaStatus::Unknown
-                    }
-                })
-                .unwrap_or(MangaStatus::Unknown);
+                manga.viewer = resp
+                    .series_type
+                    .as_ref()
+                    .map(|t| parse_viewer(&t.name))
+                    .unwrap_or(Viewer::RightToLeft);
 
-            manga.viewer = resp
-                .series_type
-                .as_ref()
-                .map(|t| {
-                    let name = t.name.to_lowercase();
-                    if name.contains("manhwa")
-                        || name.contains("webtoon")
-                        || name.contains("manhua")
-                    {
-                        Viewer::Webtoon
-                    } else {
-                        Viewer::RightToLeft
-                    }
-                })
-                .unwrap_or(Viewer::RightToLeft);
+                let tags: Vec<String> = resp
+                    .genres
+                    .iter()
+                    .filter(|g| !g.name.is_empty())
+                    .map(|g| g.name.clone())
+                    .collect();
+                if !tags.is_empty() {
+                    manga.tags = Some(tags);
+                }
 
-            let tags: Vec<String> = resp
-                .genres
-                .iter()
-                .filter_map(|g| {
-                    let name = &g.name;
-                    if name.is_empty() {
-                        None
-                    } else {
-                        Some(name.clone())
-                    }
-                })
-                .collect();
-            if !tags.is_empty() {
-                manga.tags = Some(tags);
+                manga.url = Some(format!("{}/series/{}", BASE_URL, resp.slug));
             }
-
-            manga.url = Some(format!("{}/series/{}", BASE_URL, resp.slug));
         }
 
         if needs_chapters {
+            // Extract media folder from poster URL for direct image access
+            let media_folder = series_resp.as_ref().and_then(extract_media_folder);
+
             let mut all_chapters: Vec<Chapter> = Vec::new();
             let mut current_page = 1;
             let mut has_more = true;
@@ -512,15 +510,22 @@ impl Source for MeshManga {
 
                 for ch in resp.results {
                     let date = parse_date(&ch.created_at, "yyyy-MM-dd'T'HH:mm:ss");
-
                     let chapter_number = parse_chapter_number(&ch.chapter);
 
+                    // Build chapter URL: direct media path if available, else fallback
+                    let ch_url = if let Some(ref folder) = media_folder {
+                        let ch_num = parse_chapter_int(&ch.chapter);
+                        format!("{}/{}/chapters/{:04}", MEDIA_URL, folder, ch_num)
+                    } else {
+                        format!("{}/chapter/{}/", BASE_URL, ch.id)
+                    };
+
                     all_chapters.push(Chapter {
-                        key: ch.id.to_string(),
+                        key: format!("{}", ch.id),
                         title: Some(ch.title),
                         chapter_number,
                         date_uploaded: date,
-                        url: Some(format!("{}/chapter/{}/", BASE_URL, ch.id)),
+                        url: Some(ch_url),
                         language: Some(String::from("ar")),
                         ..Default::default()
                     });
@@ -537,31 +542,31 @@ impl Source for MeshManga {
     }
 
     fn get_page_list(&self, _manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-        let chapter_id = &chapter.key;
+        let chapter_url = chapter.url.as_deref().unwrap_or("");
 
-        // Fetch chapter pages via the authenticated API
-        if let Some(chapter_pages) = fetch_chapter_pages(chapter_id) {
-            let mut pages: Vec<Page> = Vec::new();
-
-            for cp in chapter_pages {
-                if let Some(ref img_url) = cp.image {
-                    let url_str = img_url.trim();
-                    if !url_str.is_empty() {
-                        pages.push(Page {
-                            content: PageContent::Url(ensure_absolute_url(url_str), None),
-                            ..Default::default()
-                        });
-                    }
+        // Method 1: Direct image URLs (for series with known media folder)
+        if chapter_url.starts_with(MEDIA_URL) {
+            let max = find_max_page(chapter_url);
+            if max > 0 {
+                let mut pages = Vec::new();
+                for i in 1..=max {
+                    pages.push(Page {
+                        content: PageContent::Url(
+                            format!("{}/{:04}.webp", chapter_url, i),
+                            None,
+                        ),
+                        ..Default::default()
+                    });
                 }
-            }
-
-            if !pages.is_empty() {
                 return Ok(pages);
             }
         }
 
-        // If API failed (no credentials / auth error), return an empty list.
-        // The user needs to configure their login credentials in source settings.
+        // Method 2: Authenticated API fallback
+        if let Some(pages) = fetch_chapter_pages_auth(&chapter.key) {
+            return Ok(pages);
+        }
+
         Ok(Vec::new())
     }
 }
@@ -569,28 +574,20 @@ impl Source for MeshManga {
 impl ListingProvider for MeshManga {
     fn get_manga_list(&self, listing: Listing, page: i32) -> Result<MangaPageResult> {
         let url = match listing.id.as_str() {
-            "Popular" => {
-                format!(
-                    "{}/series/?ordering=-views_count&page={}&page_size={}",
-                    API_URL, page, PAGE_SIZE
-                )
-            }
-            _ => {
-                format!(
-                    "{}/series/?ordering=-created_at&page={}&page_size={}",
-                    API_URL, page, PAGE_SIZE
-                )
-            }
+            "Popular" => format!(
+                "{}/series/?ordering=-views_count&page={}&page_size={}",
+                API_URL, page, PAGE_SIZE
+            ),
+            _ => format!(
+                "{}/series/?ordering=-created_at&page={}&page_size={}",
+                API_URL, page, PAGE_SIZE
+            ),
         };
         let resp: ApiResponse<SeriesData> = Request::get(&url)?.json_owned()?;
-
         let entries: Vec<Manga> = resp.results.iter().map(series_to_manga).collect();
         let has_next_page = resp.next.is_some();
 
-        Ok(MangaPageResult {
-            entries,
-            has_next_page,
-        })
+        Ok(MangaPageResult { entries, has_next_page })
     }
 }
 
@@ -609,48 +606,20 @@ impl DeepLinkHandler for MeshManga {
             return Ok(None);
         }
 
-        let url = format!(
+        let api_url = format!(
             "{}/series/?search={}",
             API_URL,
             encode_uri_component(series_slug)
         );
-        let resp: ApiResponse<SeriesData> = Request::get(&url)?.json_owned()?;
+        let resp: ApiResponse<SeriesData> = Request::get(&api_url)?.json_owned()?;
 
         if let Some(series) = resp.results.into_iter().find(|s| s.slug == series_slug) {
             return Ok(Some(DeepLinkResult::Manga {
-                key: series.id.to_string(),
+                key: format!("{}", series.id),
             }));
         }
 
         Ok(None)
-    }
-}
-
-fn parse_chapter_number(chapter_str: &str) -> Option<f32> {
-    let parts: Vec<&str> = chapter_str.split_whitespace().collect();
-    for part in parts {
-        if let Ok(val) = part.parse::<f32>() {
-            return Some(val);
-        }
-    }
-    let parts: Vec<&str> = chapter_str.split('-').collect();
-    let mut number = 0.0_f32;
-    let mut found = false;
-    for part in parts {
-        if let Ok(val) = part.parse::<f32>() {
-            if found {
-                number += val / 10.0;
-                break;
-            } else {
-                number = val;
-                found = true;
-            }
-        }
-    }
-    if found {
-        Some(number)
-    } else {
-        Some(0.0)
     }
 }
 
