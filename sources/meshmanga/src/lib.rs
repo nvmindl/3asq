@@ -156,29 +156,40 @@ fn parse_chapter_int(chapter_str: &str) -> i32 {
     num.parse().unwrap_or(0)
 }
 
-/// Check if a URL returns HTTP 200 using a GET request.
+/// Check if a URL exists using a Range request (downloads only 1 byte).
 fn url_exists(url: &str) -> bool {
     match Request::get(url) {
-        Ok(req) => match req.send() {
-            Ok(resp) => resp.status_code() == 200,
+        Ok(req) => match req.header("Range", "bytes=0-0").send() {
+            Ok(resp) => {
+                let code = resp.status_code();
+                code == 200 || code == 206
+            }
             Err(_) => false,
         },
         Err(_) => false,
     }
 }
 
-/// Find the maximum page number by scanning sequentially.
-/// Starts from page 1 and increments until a 404 is hit.
+/// Find the maximum page number using binary search with Range requests.
+/// Each probe downloads only 1 byte, and binary search needs ~8 probes.
 fn find_max_page(base_url: &str) -> i32 {
-    let mut page = 1_i32;
-    while page <= MAX_PAGES {
-        let url = format!("{}/{:04}.webp", base_url, page);
-        if !url_exists(&url) {
-            break;
-        }
-        page += 1;
+    if !url_exists(&format!("{}/0001.webp", base_url)) {
+        return 0;
     }
-    page - 1
+
+    let mut low = 1_i32;
+    let mut high = 200;
+
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        if url_exists(&format!("{}/{:04}.webp", base_url, mid)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    low
 }
 
 fn ensure_absolute_url(url: &str) -> String {
