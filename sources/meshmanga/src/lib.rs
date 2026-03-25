@@ -156,39 +156,29 @@ fn parse_chapter_int(chapter_str: &str) -> i32 {
     num.parse().unwrap_or(0)
 }
 
-/// Check if a URL returns a successful HTTP response using a HEAD request.
+/// Check if a URL returns HTTP 200 using a GET request.
 fn url_exists(url: &str) -> bool {
-    match Request::head(url) {
+    match Request::get(url) {
         Ok(req) => match req.send() {
-            Ok(resp) => {
-                let code = resp.status_code();
-                code >= 200 && code < 400
-            }
+            Ok(resp) => resp.status_code() == 200,
             Err(_) => false,
         },
         Err(_) => false,
     }
 }
 
-/// Find the maximum page number using binary search with HEAD requests.
+/// Find the maximum page number by scanning sequentially.
+/// Starts from page 1 and increments until a 404 is hit.
 fn find_max_page(base_url: &str) -> i32 {
-    if !url_exists(&format!("{}/0001.webp", base_url)) {
-        return 0;
-    }
-
-    let mut low = 1_i32;
-    let mut high = MAX_PAGES;
-
-    while low < high {
-        let mid = (low + high + 1) / 2;
-        if url_exists(&format!("{}/{:04}.webp", base_url, mid)) {
-            low = mid;
-        } else {
-            high = mid - 1;
+    let mut page = 1_i32;
+    while page <= MAX_PAGES {
+        let url = format!("{}/{:04}.webp", base_url, page);
+        if !url_exists(&url) {
+            break;
         }
+        page += 1;
     }
-
-    low
+    page - 1
 }
 
 fn ensure_absolute_url(url: &str) -> String {
